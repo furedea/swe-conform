@@ -5,11 +5,13 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
 import batch_runner
+import codex_cli_client
 import github_client
 import guideline_classifier
 import guideline_evidence
@@ -49,17 +51,19 @@ def _parser() -> argparse.ArgumentParser:
     filter_parser = subparsers.add_parser("filter", help="Run guideline-first repository filtering")
     filter_parser.add_argument("--input-dir", type=Path, default=_DEFAULT_INPUT_DIR)
     filter_parser.add_argument("--output-dir", type=Path, default=_DEFAULT_OUTPUT_DIR)
+    filter_parser.add_argument("--provider", choices=("openai", "codex-cli"), default="openai")
     filter_parser.add_argument("--model", default=_DEFAULT_MODEL)
     filter_parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh", "max"),
-        default="medium",
     )
     filter_parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
     filter_parser.add_argument("--limit", type=_positive_integer)
     filter_parser.add_argument("--max-documents", type=_positive_integer, default=12)
     filter_parser.add_argument("--github-base-url", default="https://api.github.com")
     filter_parser.add_argument("--openai-base-url", default="https://api.openai.com/v1")
+    filter_parser.add_argument("--codex-command", default="codex")
+    filter_parser.add_argument("--model-timeout-seconds", type=_positive_integer, default=600)
     return parser
 
 
@@ -84,22 +88,20 @@ def _validate(input_dir: Path) -> None:
 
 
 def _filter(arguments: argparse.Namespace) -> None:
-    github_credential = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    openai_credential = os.environ.get("OPENAI_API_KEY")
-    if not github_credential:
-        msg = "GITHUB_TOKEN or GH_TOKEN must be set"
-        raise RuntimeError(msg)
-    if not openai_credential:
-        msg = "OPENAI_API_KEY must be set"
-        raise RuntimeError(msg)
+    credential = github_credential()
 
     candidates = repository.load_repository_candidates(arguments.input_dir)
+    reasoning_effort = effective_reasoning_effort(
+        provider=arguments.provider,
+        configured=arguments.reasoning_effort,
+    )
     configuration = {
         "schema_version": 1,
         "filter_order": ["project_guideline", "osi_approved_license"],
         "input_sha256": _input_fingerprints(arguments.input_dir),
+        "provider": arguments.provider,
         "model": arguments.model,
-        "reasoning_effort": arguments.reasoning_effort,
+        "reasoning_effort": reasoning_effort,
         "max_documents": arguments.max_documents,
         "classification_contract_sha256": guideline_classifier.contract_fingerprint(),
         "github_base_url": arguments.github_base_url,
@@ -110,13 +112,10 @@ def _filter(arguments: argparse.Namespace) -> None:
     store.initialize()
 
     github_api = github_client.GitHubClient(
-        token=github_credential,
+        token=credential,
         base_url=arguments.github_base_url,
     )
-    model_api = openai_responses_client.OpenAIResponsesClient(
-        api_key=openai_credential,
-        base_url=arguments.openai_base_url,
-    )
+    model_api = _model_client(arguments)
     try:
         selector = guideline_evidence.CandidateDocumentSelector(max_documents=arguments.max_documents)
         collector = guideline_evidence.GuidelineEvidenceCollector(client=github_api, selector=selector)
@@ -124,7 +123,7 @@ def _filter(arguments: argparse.Namespace) -> None:
             collector=collector,
             model_client=model_api,
             model=arguments.model,
-            reasoning_effort=arguments.reasoning_effort,
+            reasoning_effort=reasoning_effort,
         )
         repository_filter = pipeline.RepositoryFilter(
             guideline_checker=guideline_checker,
@@ -141,6 +140,49 @@ def _filter(arguments: argparse.Namespace) -> None:
         model_api.close()
         github_api.close()
     print(json.dumps(_stats_report(stats), indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def effective_reasoning_effort(*, provider: str, configured: str | None) -> str:
+    """Resolve the provider-specific default reasoning effort."""
+    if configured is not None:
+        return configured
+    return "max" if provider == "codex-cli" else "medium"
+
+
+def github_credential() -> str:
+    """Load GitHub authentication from the environment or the authenticated gh CLI."""
+    credential = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if credential:
+        return credential
+    completed = subprocess.run(
+        ["gh", "auth", "token"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    credential = completed.stdout.strip()
+    if completed.returncode == 0 and credential:
+        return credential
+    msg = "GITHUB_TOKEN, GH_TOKEN, or an authenticated gh CLI is required"
+    raise RuntimeError(msg)
+
+
+def _model_client(
+    arguments: argparse.Namespace,
+) -> codex_cli_client.CodexCliClient | openai_responses_client.OpenAIResponsesClient:
+    if arguments.provider == "codex-cli":
+        return codex_cli_client.CodexCliClient(
+            command=arguments.codex_command,
+            timeout_seconds=arguments.model_timeout_seconds,
+        )
+    credential = os.environ.get("OPENAI_API_KEY")
+    if not credential:
+        msg = "OPENAI_API_KEY must be set for the openai provider"
+        raise RuntimeError(msg)
+    return openai_responses_client.OpenAIResponsesClient(
+        api_key=credential,
+        base_url=arguments.openai_base_url,
+    )
 
 
 def _log_progress(completed: int, total: int, result: pipeline.RepositoryResult) -> None:
