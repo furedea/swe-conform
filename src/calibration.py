@@ -6,9 +6,26 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 _STATUSES = ("pass", "review", "not_found")
+_DEFAULT_LANGUAGES = ("Java", "JavaScript", "Python", "TypeScript")
+_PRIOR_CLASSIFICATION_FIELDS = frozenset(
+    {
+        "repository_url",
+        "license_spdx_id",
+        "license_status",
+        "license_reason",
+        "guideline_status",
+        "guideline_reason",
+        "guideline_path",
+        "guideline_url",
+        "guideline_evidence",
+        "candidate_count",
+        "candidate_documents_json",
+        "tree_truncated",
+    },
+)
 
 
 class ClassMetrics(TypedDict):
@@ -67,6 +84,97 @@ def evaluate_files(
         _read_csv(predictions_path),
         split=split,
     )
+
+
+def select_hard_candidates(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    excluded_repositories: set[str],
+    languages: Sequence[str],
+    pass_per_language: int = 1,
+    dense_review_per_language: int = 2,
+    weak_review_per_language: int = 2,
+) -> list[dict[str, str]]:
+    """Select deterministic subtle, dense, and weak boundary cases by language."""
+    selected: list[dict[str, str]] = []
+    selected_owners: set[str] = set()
+    selected_project_names: set[str] = set()
+    for language in languages:
+        strata = (
+            ("subtle_confirmed", "pass", pass_per_language, False),
+            ("dense_unconfirmed", "review", dense_review_per_language, True),
+            ("weak_unconfirmed", "review", weak_review_per_language, False),
+        )
+        for stratum, status, quota, descending in strata:
+            ranked = sorted(
+                (
+                    row
+                    for row in rows
+                    if row["mainLanguage"] == language
+                    and row["guideline_status"] == status
+                    and row["name"] not in excluded_repositories
+                    and row.get("tree_truncated", "false").lower() != "true"
+                ),
+                key=lambda row: (
+                    -_difficulty_score(row) if descending else _difficulty_score(row),
+                    row["name"].casefold(),
+                ),
+            )
+            chosen: list[Mapping[str, str]] = []
+            for row in ranked:
+                if len(chosen) >= quota:
+                    break
+                owner = _owner(row["name"])
+                project_name = _project_name(row["name"])
+                if owner in selected_owners or project_name in selected_project_names:
+                    continue
+                chosen.append(row)
+                selected_owners.add(owner)
+                selected_project_names.add(project_name)
+            if len(chosen) < quota:
+                msg = f"Not enough diverse hard candidates for {language}/{stratum}: {len(chosen)} < {quota}"
+                raise ValueError(msg)
+            for row in chosen:
+                annotated = dict(row)
+                annotated["sampling_stratum"] = stratum
+                annotated["difficulty_score"] = str(_difficulty_score(row))
+                annotated["difficulty_reason"] = _difficulty_reason(stratum)
+                selected.append(annotated)
+    return selected
+
+
+def write_hard_input(
+    classified_path: Path,
+    previous_gold_path: Path,
+    output_dir: Path,
+    *,
+    languages: Sequence[str] = _DEFAULT_LANGUAGES,
+    pass_per_language: int = 1,
+    dense_review_per_language: int = 2,
+    weak_review_per_language: int = 2,
+) -> Path:
+    """Select hard cases and write an input CSV without prior classification labels."""
+    excluded = {row["repository"] for row in _read_csv(previous_gold_path)}
+    selected = select_hard_candidates(
+        _read_csv(classified_path),
+        excluded_repositories=excluded,
+        languages=languages,
+        pass_per_language=pass_per_language,
+        dense_review_per_language=dense_review_per_language,
+        weak_review_per_language=weak_review_per_language,
+    )
+    rows = [
+        {name: value for name, value in row.items() if name not in _PRIOR_CLASSIFICATION_FIELDS} for row in selected
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "candidates.csv"
+    temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    temporary_path.replace(output_path)
+    return output_path
 
 
 def write_split_input(input_path: Path, output_dir: Path, *, split: str) -> Path:
@@ -134,11 +242,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     evaluate_parser.add_argument("gold_labels", type=Path)
     evaluate_parser.add_argument("predictions", type=Path)
     evaluate_parser.add_argument("--split", choices=("tuning", "holdout"))
+    hard_parser = subparsers.add_parser("select-hard-input")
+    hard_parser.add_argument("classified", type=Path)
+    hard_parser.add_argument("previous_gold", type=Path)
+    hard_parser.add_argument("output_dir", type=Path)
     split_parser = subparsers.add_parser("split-input")
     split_parser.add_argument("input", type=Path)
     split_parser.add_argument("output_dir", type=Path)
     split_parser.add_argument("--split", choices=("tuning", "holdout"), required=True)
     arguments = parser.parse_args(argv)
+    if arguments.command == "select-hard-input":
+        output_path = write_hard_input(arguments.classified, arguments.previous_gold, arguments.output_dir)
+        print(output_path)
+        return
     if arguments.command == "split-input":
         output_path = write_split_input(arguments.input, arguments.output_dir, split=arguments.split)
         print(output_path)
@@ -154,6 +270,47 @@ def main(argv: Sequence[str] | None = None) -> None:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as input_file:
         return list(csv.DictReader(input_file))
+
+
+def _difficulty_score(row: Mapping[str, str]) -> int:
+    raw_documents = json.loads(row.get("candidate_documents_json", "[]") or "[]")
+    documents = cast(list[Mapping[str, object]], raw_documents)
+    strong_matches = max((_integer(document.get("strong_matches")) for document in documents), default=0)
+    normative_matches = max((_integer(document.get("normative_matches")) for document in documents), default=0)
+    code_matches = max((_integer(document.get("code_matches")) for document in documents), default=0)
+    score = strong_matches * 10 + normative_matches * 4 + min(code_matches, 25) + _integer(row.get("candidate_count"))
+    if row["guideline_status"] == "pass":
+        score += _pass_path_ambiguity(row.get("guideline_path", ""))
+    return score
+
+
+def _difficulty_reason(stratum: str) -> str:
+    reasons = {
+        "subtle_confirmed": "lowest-density prior confirmed rule",
+        "dense_unconfirmed": "highest-density prior unconfirmed candidate",
+        "weak_unconfirmed": "lowest-density prior unconfirmed candidate",
+    }
+    return reasons[stratum]
+
+
+def _integer(value: object) -> int:
+    return int(str(value)) if value not in (None, "") else 0
+
+
+def _pass_path_ambiguity(path: str) -> int:
+    lowered = path.casefold()
+    if "readme" in lowered:
+        return 20
+    obvious_tokens = ("contribut", "style", "guideline", "develop", "hacking")
+    return 0 if any(token in lowered for token in obvious_tokens) else 8
+
+
+def _owner(repository: str) -> str:
+    return repository.partition("/")[0].casefold()
+
+
+def _project_name(repository: str) -> str:
+    return repository.partition("/")[2].casefold()
 
 
 def _prediction_index(

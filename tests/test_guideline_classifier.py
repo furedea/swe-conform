@@ -105,6 +105,9 @@ def test_checker_accepts_pass_only_with_verbatim_evidence(
     assert "linked developer, coding, or style guide" in instructions
     assert "generic contributing, setup, or build guide" in instructions
     assert "Tool badges or metadata" in instructions
+    assert "optional formatting aid" in instructions
+    assert "declarative adoption statement" in instructions
+    assert "Never remove, replace, or join across line breaks" in instructions
 
 
 def test_checker_downgrades_unverifiable_pass_to_review(mocker: pytest_mock.MockerFixture) -> None:
