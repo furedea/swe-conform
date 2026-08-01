@@ -2,6 +2,7 @@
 result
 result-*
 logs/
+output/
 
 .DS_Store
 .env

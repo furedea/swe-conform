@@ -1,10 +1,15 @@
 [project]
-name = "template-python"
+name = "swe-guideline-refactor"
 version = "0.1.0"
 description = ""
 readme = "README.md"
 requires-python = "== 3.14.*"
-dependencies = []
+dependencies = [
+  "httpx==0.28.1",
+]
+
+[project.scripts]
+swe-guideline-refactor = "main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
