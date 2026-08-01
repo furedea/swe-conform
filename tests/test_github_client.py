@@ -4,8 +4,19 @@ import base64
 from unittest.mock import MagicMock
 
 import httpx
+import pytest_mock
 
 import github_client
+
+
+def test_client_follows_github_redirects_by_default(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    http_client_factory = mocker.patch("github_client.httpx.Client", autospec=True)
+
+    github_client.GitHubClient(token="test-credential")
+
+    http_client_factory.assert_called_once_with(timeout=60.0, follow_redirects=True)
 
 
 def test_client_reads_recursive_tree_and_decodes_blob() -> None:

@@ -58,7 +58,10 @@ class GitHubClient:
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        self._client = http_client or httpx.Client(timeout=_DEFAULT_TIMEOUT_SECONDS)
+        self._client = http_client or httpx.Client(
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        )
 
     def get_tree(self, repository: str, revision: str) -> RepositoryTree:
         """Return blob entries from a recursively retrieved Git tree."""
