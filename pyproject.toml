@@ -136,6 +136,24 @@ ignore = [
   "E117",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = [
+  "batch_runner",
+  "calibration",
+  "codex_cli_client",
+  "evidence_export",
+  "github_client",
+  "guideline",
+  "guideline_classifier",
+  "guideline_evidence",
+  "license_filter",
+  "main",
+  "openai_responses_client",
+  "pipeline",
+  "repository",
+  "result_store",
+]
+
 [tool.ty.src]
 include = ["src", "tests"]
 

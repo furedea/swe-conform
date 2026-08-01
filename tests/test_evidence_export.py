@@ -3,9 +3,9 @@
 import json
 from pathlib import Path
 
-import evidence_export
 from pytest_mock import MockerFixture
 
+import evidence_export
 import guideline_evidence
 import repository
 
