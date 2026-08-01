@@ -8,9 +8,6 @@ dependencies = [
   "httpx==0.28.1",
 ]
 
-[project.scripts]
-swe-guideline-refactor = "main:main"
-
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
@@ -22,6 +19,8 @@ testpaths = ["tests"]
 ignore_notebooks = true
 known_first_party = [
   "batch_runner",
+  "calibration",
+  "codex_cli_client",
   "github_client",
   "guideline",
   "guideline_classifier",

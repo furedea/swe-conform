@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "run_date": "2026-08-01",
+  "execution": {
+    "provider": "codex-cli",
+    "codex_cli_version": "0.146.0",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "workers": 2,
+    "model_timeout_seconds": 900,
+    "harness_isolation": [
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--ephemeral",
+      "--skip-git-repo-check",
+      "--sandbox=read-only",
+      "temporary-empty-working-directory"
+    ]
+  },
+  "sample": {
+    "total": 20,
+    "tuning": 12,
+    "holdout": 8,
+    "candidate_sha256": "00ad99eafb8e0ba0c5b048c275f287cbfc1d983dcb070727c7917d05b1cd56e8",
+    "gold_labels_sha256": "2cb8b1ce82dc0a73b780c61d82cf4b7bc57abd83d52c344ac8c4b5ca47b152b1",
+    "gold_adjudicator": "Codex sol with xhigh reasoning"
+  },
+  "runs": [
+    {
+      "name": "v1-baseline",
+      "split": "tuning",
+      "samples": 12,
+      "accuracy": 0.75,
+      "macro_f1": 0.5357142857142857,
+      "support": { "pass": 6, "review": 2, "not_found": 4 },
+      "confusion_matrix": {
+        "pass": { "pass": 6, "review": 0, "not_found": 0 },
+        "review": { "pass": 1, "review": 0, "not_found": 1 },
+        "not_found": { "pass": 1, "review": 0, "not_found": 3 }
+      },
+      "contract_sha256": "325246b11f1af8e2a9ab06a943e60cbac3adba03c2078c6622c4d15776620c1e",
+      "executed_repositories": 20,
+      "elapsed_seconds": 185.53,
+      "elapsed_note": "162.79-second initial run plus a 22.74-second retry after fixing GitHub redirect handling",
+      "tokens": { "input": 522704, "output": 8989, "total": 531693 }
+    },
+    {
+      "name": "v2-guideline-boundaries",
+      "split": "tuning",
+      "samples": 12,
+      "accuracy": 0.8333333333333334,
+      "macro_f1": 0.7777777777777777,
+      "support": { "pass": 6, "review": 2, "not_found": 4 },
+      "confusion_matrix": {
+        "pass": { "pass": 6, "review": 0, "not_found": 0 },
+        "review": { "pass": 0, "review": 2, "not_found": 0 },
+        "not_found": { "pass": 0, "review": 2, "not_found": 2 }
+      },
+      "contract_sha256": "5c8db7cd74962a22c6f345883d6e5345dd4f13615cdd6fa95581d126c932a116",
+      "executed_repositories": 12,
+      "elapsed_seconds": 118.279,
+      "tokens": { "input": 280254, "output": 7350, "total": 287604 }
+    },
+    {
+      "name": "v3-explicit-review",
+      "split": "tuning",
+      "samples": 12,
+      "accuracy": 1.0,
+      "macro_f1": 1.0,
+      "support": { "pass": 6, "review": 2, "not_found": 4 },
+      "confusion_matrix": {
+        "pass": { "pass": 6, "review": 0, "not_found": 0 },
+        "review": { "pass": 0, "review": 2, "not_found": 0 },
+        "not_found": { "pass": 0, "review": 0, "not_found": 4 }
+      },
+      "contract_sha256": "4f898ce9405039cfcb6601ae1fbdede88606da79daef322b9ba4d3f973f50de0",
+      "executed_repositories": 12,
+      "elapsed_seconds": 109.288,
+      "tokens": { "input": 280646, "output": 5551, "total": 286197 }
+    },
+    {
+      "name": "v3-holdout",
+      "split": "holdout",
+      "samples": 8,
+      "accuracy": 1.0,
+      "macro_f1": 0.6666666666666666,
+      "macro_f1_note": "not_found had zero holdout support and is assigned F1=0",
+      "support": { "pass": 7, "review": 1, "not_found": 0 },
+      "confusion_matrix": {
+        "pass": { "pass": 7, "review": 0, "not_found": 0 },
+        "review": { "pass": 0, "review": 1, "not_found": 0 },
+        "not_found": { "pass": 0, "review": 0, "not_found": 0 }
+      },
+      "contract_sha256": "4f898ce9405039cfcb6601ae1fbdede88606da79daef322b9ba4d3f973f50de0",
+      "executed_repositories": 8,
+      "elapsed_seconds": 79.829,
+      "tokens": { "input": 245122, "output": 4390, "total": 249512 }
+    }
+  ],
+  "stopping_rule": "Stop when tuning accuracy reaches 1.0 or a generalized prompt revision no longer improves accuracy, using macro-F1 as a secondary metric.",
+  "adjudication_corrections": [
+    {
+      "repository": "harry0703/MoneyPrinterTurbo",
+      "from": "not_found",
+      "to": "pass",
+      "reason": "The initial blind review overlooked concrete test naming and file-responsibility rules in test/README.md. The correction was made after v1 comparison and before prompt tuning."
+    }
+  ]
+}

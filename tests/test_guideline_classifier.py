@@ -98,6 +98,13 @@ def test_checker_accepts_pass_only_with_verbatim_evidence(
     assert result.evidence_path == "CONTRIBUTING.md"
     assert result.model_called
     assert model_client.complete_json.call_args.kwargs["model"] == "gpt-5.6-luna"
+    instructions = model_client.complete_json.call_args.kwargs["instructions"]
+    assert "describes how a public API behaves" in instructions
+    assert "consumers use it" in instructions
+    assert "unnamed linter or formatter" in instructions
+    assert "linked developer, coding, or style guide" in instructions
+    assert "generic contributing, setup, or build guide" in instructions
+    assert "Tool badges or metadata" in instructions
 
 
 def test_checker_downgrades_unverifiable_pass_to_review(mocker: pytest_mock.MockerFixture) -> None:

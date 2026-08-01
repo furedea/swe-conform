@@ -19,23 +19,33 @@ test-data directories. It also excludes agent instruction files, changelogs,
 codes of conduct, release documents, and security policies. Files larger than
 200,000 bytes are not sent to the model.
 
-When candidate documents exist, the filter makes one OpenAI Responses API call
-per repository. The default model is `gpt-5.6-luna`. The request uses strict
-JSON Schema with these outcomes:
+When candidate documents exist, the filter makes one structured model call per
+repository. The default provider is the OpenAI Responses API. The optional
+Codex CLI provider runs in a temporary empty directory with user configuration,
+rules, persistence, and project instructions disabled. Both providers default
+to `gpt-5.6-luna`; Codex defaults to maximum reasoning effort. The request uses
+strict JSON Schema with these outcomes:
 
 - `pass`: a concrete normative rule applies to implementing or modifying source
   code or tests
 - `review`: evidence is ambiguous or incomplete
 - `not_found`: supplied documents contain no qualifying rule
 
-Formatting, linting, naming, imports, type usage, API compatibility, source
-structure, function, method, class, and test-code requirements qualify. An
-explicit external coding standard also qualifies when the project requires its
-use.
+Formatting, linting, naming, imports, type usage, compatibility, source
+structure, function, method, class, and test-authoring requirements qualify. A
+requirement to add tests for implementation changes qualifies, as does an
+explicitly required and named external coding standard. Merely running existing
+checks does not qualify.
 
 Contribution workflow, issue and pull-request process, commit messages, release
-notes, documentation-only style, license terms, security reporting, and vague
-requests to follow existing style do not qualify.
+notes, documentation-only style, license terms, security reporting, consumer API
+documentation, and vague requests to follow existing style do not qualify.
+Tool badges and metadata are not contributor requirements.
+
+An unnamed mandatory linter or formatter is `review` unless the document states
+a concrete rule. A linked but unavailable developer, coding, or style guide is
+also `review`. Generic contribution, setup, and build links do not create that
+uncertainty and remain `not_found` when no qualifying rule exists.
 
 A model `pass` must include a repository path and a verbatim quote. The filter
 downgrades the result to `review` if the path was not retrieved or the quote is
@@ -65,7 +75,7 @@ directory cannot be resumed with a conflicting configuration.
 An append-only JSONL checkpoint is written after each repository. Reports use
 the latest record for a repository revision and restore the original input
 order. Retrieval and model errors remain retryable on later runs. `summary.json`
-records aggregate input, output, and total API token usage.
+records aggregate input, output, and total model token usage.
 
 ## Limitations
 
