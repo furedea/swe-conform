@@ -20,6 +20,18 @@ testpaths = ["tests"]
 
 [tool.deptry]
 ignore_notebooks = true
+known_first_party = [
+  "batch_runner",
+  "github_client",
+  "guideline",
+  "guideline_classifier",
+  "guideline_evidence",
+  "license_filter",
+  "openai_responses_client",
+  "pipeline",
+  "repository",
+  "result_store",
+]
 
 [tool.vulture]
 paths = ["src", "tests"]
