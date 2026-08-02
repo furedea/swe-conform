@@ -63,7 +63,7 @@ def test_checker_requires_manual_review_when_empty_tree_is_truncated(
     model_client.complete_json.assert_not_called()
 
 
-def test_checker_accepts_pass_only_with_verbatim_evidence(
+def test_checker_uses_project_specific_guideline_contract(
     mocker: pytest_mock.MockerFixture,
 ) -> None:
     collector = mocker.Mock(spec=guideline_evidence.GuidelineEvidenceCollector)
@@ -71,7 +71,7 @@ def test_checker_accepts_pass_only_with_verbatim_evidence(
         documents=(
             guideline_evidence.GuidelineDocument(
                 path="CONTRIBUTING.md",
-                content="All Python functions must use snake_case names.",
+                content="Parser nodes must be created through NodeFactory so source spans remain attached.",
             ),
         ),
         tree_truncated=False,
@@ -80,9 +80,9 @@ def test_checker_accepts_pass_only_with_verbatim_evidence(
     model_client.complete_json.return_value = openai_responses_client.JsonResponse(
         value={
             "status": "pass",
-            "reason": "The document defines a concrete naming rule.",
+            "reason": "The rule constrains construction of this project's parser nodes.",
             "evidence_path": "CONTRIBUTING.md",
-            "evidence_quote": "Python functions must use snake_case names.",
+            "evidence_quote": "Parser nodes must be created through NodeFactory",
         },
         usage=guideline.TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
     )
@@ -99,15 +99,17 @@ def test_checker_accepts_pass_only_with_verbatim_evidence(
     assert result.model_called
     assert model_client.complete_json.call_args.kwargs["model"] == "gpt-5.6-luna"
     instructions = model_client.complete_json.call_args.kwargs["instructions"]
+    assert "human review" in instructions
+    assert "project-specific implementation guideline" in instructions
+    assert "counterfactual test" in instructions
+    assert "named or unnamed general coding standards" in instructions
+    assert "configuration files" in instructions
     assert "describes how a public API behaves" in instructions
     assert "consumers use it" in instructions
-    assert "unnamed linter or formatter" in instructions
-    assert "linked developer, coding, or style guide" in instructions
+    assert "project-specific developer, design, or coding guide" in instructions
     assert "generic contributing, setup, or build guide" in instructions
-    assert "Tool badges or metadata" in instructions
-    assert "optional formatting aid" in instructions
-    assert "declarative adoption statement" in instructions
     assert "Never remove, replace, or join across line breaks" in instructions
+    assert "declarative adoption statement" not in instructions
 
 
 def test_checker_downgrades_unverifiable_pass_to_review(mocker: pytest_mock.MockerFixture) -> None:
