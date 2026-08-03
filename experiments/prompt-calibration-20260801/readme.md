@@ -45,42 +45,6 @@ explicit code-guidance context for unresolved links and excluded tool badges or
 metadata from `review`. No repository names or repository-specific examples were
 added to any prompt.
 
-Exact prompts, gold labels, contract hashes, confusion matrices, elapsed times,
-and token usage are stored beside this file.
-
-## Reproduction
-
-Create one split input:
-
-```bash
-uv run --frozen python src/calibration.py split-input \
-  experiments/prompt-calibration-20260801/input/candidates.csv \
-  output/prompt-calibration/input-tuning \
-  --split tuning
-```
-
-Run the current frozen v3 classifier:
-
-```bash
-uv run --frozen python src/main.py filter \
-  --provider codex-cli \
-  --input-dir output/prompt-calibration/input-tuning \
-  --output-dir output/prompt-calibration/reproduction-v3-tuning \
-  --model gpt-5.6-luna \
-  --reasoning-effort max \
-  --workers 2 \
-  --model-timeout-seconds 900
-```
-
-Evaluate the run:
-
-```bash
-uv run --frozen python src/calibration.py evaluate \
-  experiments/prompt-calibration-20260801/gold_labels.csv \
-  output/prompt-calibration/reproduction-v3-tuning/all_classified.csv \
-  --split tuning
-```
-
-The Codex client runs in a temporary empty directory with user configuration,
-rules, persistence, and project instructions disabled. It uses a read-only
-sandbox and records Codex-reported input and output token usage.
+Gold labels, contract hashes, confusion matrices, elapsed times, and token usage
+are stored beside this file. Historical prompt texts and reproduction commands
+are not retained; only the active classifier contract is supported.

@@ -56,42 +56,9 @@ names or repository-specific examples appear in a prompt.
 The stopping rule was accuracy 1.0 or no improvement from a generalized prompt
 revision. v5 reached the finite-sample ceiling.
 
-## Reproduction
-
-Export the exact prediction-blind evidence payloads:
-
-```bash
-uv run --frozen python src/evidence_export.py \
-  experiments/hard-prompt-calibration-20260802/input \
-  output/hard-prompt-calibration/blind_evidence.json \
-  --max-documents 12
-```
-
-Run the final prompt on all 20 repositories:
-
-```bash
-uv run --frozen python src/main.py filter \
-  --provider codex-cli \
-  --input-dir experiments/hard-prompt-calibration-20260802/input \
-  --output-dir output/hard-prompt-calibration/reproduction-v5 \
-  --model gpt-5.6-luna \
-  --reasoning-effort max \
-  --workers 2 \
-  --model-timeout-seconds 900
-```
-
-Evaluate the predictions:
-
-```bash
-uv run --frozen python src/calibration.py evaluate \
-  experiments/hard-prompt-calibration-20260802/gold_labels.csv \
-  output/hard-prompt-calibration/reproduction-v5/all_classified.csv
-```
-
-The Codex client disables user configuration, rules, persistence, and project
-instructions. It runs in a temporary empty directory with a read-only sandbox.
-Exact prompts, hashes, confusion matrices, elapsed times, token usage, and
-limitations are recorded in `results.json`.
+Contract hashes, confusion matrices, elapsed times, token usage, and limitations
+are recorded in `results.json`. Historical prompt texts and reproduction
+commands are not retained; only the active classifier contract is supported.
 
 ## Interpretation
 
