@@ -38,14 +38,13 @@ class GitRepositoryCache:
     def ensure_snapshot(self, repository: str, revision: str) -> CacheDisposition:
         """Fetch every Git object reachable from a pinned revision."""
         cache_path = self.path(repository)
-        if cache_path.exists() and self._snapshot_exists(cache_path, revision):
-            return CacheDisposition.CACHED
         remote_url = f"https://github.com/{repository}.git"
-        if not cache_path.exists():
+        if not cache_path.exists() or not self._repository_exists(cache_path):
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._run([self._command, "init", "--bare", "--quiet", str(cache_path)])
-            self._add_origin(cache_path, remote_url)
-        elif not self._origin_exists(cache_path):
+        if self._snapshot_exists(cache_path, revision):
+            return CacheDisposition.CACHED
+        if not self._origin_exists(cache_path):
             self._add_origin(cache_path, remote_url)
         self._run(
             [
@@ -60,6 +59,18 @@ class GitRepositoryCache:
             ],
         )
         return CacheDisposition.FETCHED
+
+    def _repository_exists(self, cache_path: Path) -> bool:
+        completed = self._execute(
+            [
+                self._command,
+                "--git-dir",
+                str(cache_path),
+                "rev-parse",
+                "--is-bare-repository",
+            ],
+        )
+        return completed.returncode == 0 and completed.stdout.strip() == "true"
 
     def path(self, repository: str) -> Path:
         """Return the bare-cache path for an owner/repository name."""

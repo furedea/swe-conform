@@ -254,19 +254,19 @@ def _verified_evidence_item(
     item = cast(dict[str, object], raw_item)
     path = str(item.get("path", ""))
     quote = str(item.get("quote", ""))
-    if not path or not quote or path in existing_paths:
+    if not path or not quote:
         return None
     evidence_path = (root / path).resolve()
     try:
-        evidence_path.relative_to(root)
+        normalized_path = evidence_path.relative_to(root).as_posix()
     except ValueError:
         return None
-    if not evidence_path.is_file():
+    if normalized_path in existing_paths or not evidence_path.is_file():
         return None
     content = evidence_path.read_bytes()
     if quote not in content.decode(encoding="utf-8", errors="replace"):
         return None
-    return guideline.GuidelineEvidence(path=path, quote=quote, content=content)
+    return guideline.GuidelineEvidence(path=normalized_path, quote=quote, content=content)
 
 
 def _error_reason(prefix: str, error: Exception) -> str:

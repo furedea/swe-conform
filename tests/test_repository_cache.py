@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
 import repository_cache
@@ -16,6 +17,8 @@ def test_cache_fetches_complete_history_and_blobs_for_the_snapshot_revision(
     def run_side_effect(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
         if command[1:4] == ["init", "--bare", "--quiet"]:
             Path(command[4]).mkdir(parents=True)
+        if "show-ref" in command or "get-url" in command:
+            return CompletedProcess(args=command, returncode=1, stdout="", stderr="")
         return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     run = mocker.patch("repository_cache.subprocess.run", autospec=True, side_effect=run_side_effect)
@@ -31,7 +34,7 @@ def test_cache_fetches_complete_history_and_blobs_for_the_snapshot_revision(
     assert "--filter" not in " ".join(fetch_command)
     assert "--no-tags" in fetch_command
     assert f"{revision}:refs/snapshots/{revision}" in fetch_command
-    assert "https://github.com/example/project.git" in commands[1]
+    assert any("https://github.com/example/project.git" in command for command in commands)
 
 
 def test_cache_reuses_a_completed_snapshot_without_network_access(
@@ -43,7 +46,7 @@ def test_cache_reuses_a_completed_snapshot_without_network_access(
     run = mocker.patch(
         "repository_cache.subprocess.run",
         autospec=True,
-        return_value=CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        return_value=CompletedProcess(args=[], returncode=0, stdout="true\n", stderr=""),
     )
     cache = repository_cache.GitRepositoryCache(root=tmp_path)
 
@@ -51,32 +54,35 @@ def test_cache_reuses_a_completed_snapshot_without_network_access(
 
     assert disposition is repository_cache.CacheDisposition.CACHED
     commands = [call.args[0] for call in run.call_args_list]
-    assert len(commands) == 1
-    assert "show-ref" in commands[0]
-    assert "fetch" not in commands[0]
+    assert len(commands) == 2
+    assert "rev-parse" in commands[0]
+    assert "show-ref" in commands[1]
+    assert all("fetch" not in command for command in commands)
 
 
-def test_cache_repairs_an_interrupted_initialization_before_fetching(
-    mocker: MockerFixture,
+def test_cache_repairs_an_empty_directory_before_fetching(
     tmp_path: Path,
+    monkeypatch: MonkeyPatch,
 ) -> None:
+    origin = tmp_path / "origin"
+    revision = _create_origin(origin)
+    git_config = tmp_path / "gitconfig"
+    git_config.write_text(
+        f'[url "{origin.as_uri()}"]\n\tinsteadOf = https://github.com/example/project.git\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(git_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
     cache_path = tmp_path / "example" / "project.git"
     cache_path.mkdir(parents=True)
-
-    def run_side_effect(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
-        if "show-ref" in command or "get-url" in command:
-            return CompletedProcess(args=command, returncode=1, stdout="", stderr="")
-        return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
-
-    run = mocker.patch("repository_cache.subprocess.run", autospec=True, side_effect=run_side_effect)
     cache = repository_cache.GitRepositoryCache(root=tmp_path)
 
-    disposition = cache.ensure_snapshot("example/project", "0123456789abcdef")
+    disposition = cache.ensure_snapshot("example/project", revision)
 
     assert disposition is repository_cache.CacheDisposition.FETCHED
-    commands = [call.args[0] for call in run.call_args_list]
-    assert any("remote" in command and "add" in command for command in commands)
-    assert any("fetch" in command for command in commands)
+    snapshot = _git("--git-dir", str(cache_path), "show-ref", "--verify", f"refs/snapshots/{revision}")
+    assert snapshot.stdout.split()[0] == revision
 
 
 def test_cache_contains_snapshot_ancestors_but_not_later_descendants(tmp_path: Path) -> None:
@@ -120,3 +126,16 @@ def _git(*arguments: str, cwd: Path | None = None, check: bool = True) -> Comple
         text=True,
         check=check,
     )
+
+
+def _create_origin(origin: Path) -> str:
+    origin.mkdir()
+    _git("init", "--quiet", cwd=origin)
+    _git("config", "user.email", "research@example.com", cwd=origin)
+    _git("config", "user.name", "Research Fixture", cwd=origin)
+    (origin / "source.txt").write_text("snapshot\n", encoding="utf-8")
+    _git("add", "source.txt", cwd=origin)
+    _git("commit", "--quiet", "-m", "snapshot", cwd=origin)
+    revision = _git("rev-parse", "HEAD", cwd=origin).stdout.strip()
+    _git("update-ref", f"refs/snapshots/{revision}", revision, cwd=origin)
+    return revision
