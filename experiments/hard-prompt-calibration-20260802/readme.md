@@ -1,68 +1,50 @@
-# Hard-Case Prompt Calibration
+# Current-Prompt Hard-Case Pilot
 
-This experiment tests the project-guideline classifier on 20 fixed, difficult
-repository revisions. Every prompt version is run on all 20 cases with the
-signed-in Codex CLI, `gpt-5.6-luna`, maximum reasoning effort, and one
-structured turn per repository. No API-billed OpenAI endpoint is used.
+This directory records one repository-wide project-guideline classification
+run over 20 fixed, difficult repository revisions. The run used the prompt in
+`prompt.txt`, the signed-in Codex CLI, `gpt-5.6-luna`, maximum reasoning
+effort, and classification contract
+`8c077d5ffe1cdeaeac9884477d61757e49306db756cbfd7567baa360a927e85c`.
 
-## Selection
+## Input
 
-The sample contains five repositories from each of Java, JavaScript, Python,
-and TypeScript. Each language uses three strata from the previous deterministic
-document detector:
+The input contains five repositories from each of Java, JavaScript, Python,
+and TypeScript. `input/candidates.csv` is revision-pinned and has SHA-256
+`6517bd70972e779f6687176e5fec3aaa9173fc837b3d1c61c5aadb9cb5f8eb32`.
 
-- one lowest-density prior `pass` (`subtle_confirmed`),
-- two highest-density prior `review` cases (`dense_unconfirmed`), and
-- two lowest-density prior `review` cases (`weak_unconfirmed`).
+## Execution
 
-The score is `10 * strong + 4 * normative + min(code, 25) + document count`,
-plus a path-ambiguity adjustment for prior `pass` cases. Previous pilot
-repositories, truncated trees, duplicate owners, and duplicate project names
-are excluded. Prior statuses and document scores select the sample but are
-removed from classifier input.
+The initial run evaluated all 20 repositories with four workers and a
+300-second checkout timeout. It produced 15 `pass`, three `review`, one
+`not_found`, and one `model_error`. The error was a checkout timeout for
+`Azure/Azure-Sentinel`.
 
-An initial design that selected only the highest-density cases was discarded
-before any Luna prediction was generated. Blind adjudication showed that it
-was overwhelmingly positive and therefore unsuitable for three-class prompt
-calibration.
+That repository was retried once under the same classification contract with
+one worker and a 900-second checkout timeout. The retry returned `pass`.
+`final_results.jsonl` replaces only the failed Azure classification while
+preserving its original input index.
 
-## Adjudication
+## Final Results
 
-The exact classifier evidence payloads were exported before baseline
-prediction. Codex sol at xhigh reasoning labeled them without seeing Luna
-outputs. The final support is 12 `pass`, two `review`, and six `not_found`.
-Every positive evidence quote is verified as a substring of the specified
-revision-pinned document.
+| Status      | Count |
+| ----------- | ----: |
+| `pass`      |    16 |
+| `review`    |     3 |
+| `not_found` |     1 |
 
-The initial blind label for `custom-cards/button-card` missed a mandatory but
-unnamed linting and formatting condition in a secondary candidate document.
-It was corrected from `not_found` to `review` after baseline comparison and
-before prompt revision. This post-hoc correction is retained in `results.json`.
+The 21 model calls used 3,386,956 input tokens, 53,107 output tokens, and
+3,440,063 total tokens.
 
-## Results
+## Artifacts
 
-| Prompt                                | Correct | Accuracy | Macro-F1 | Seconds |  Tokens |
-| ------------------------------------- | ------: | -------: | -------: | ------: | ------: |
-| v3 baseline                           |   18/20 |    0.900 |    0.844 | 198.529 | 686,166 |
-| v4 required review and verbatim lines |   19/20 |    0.950 |    0.960 | 193.363 | 688,446 |
-| v5 named-tool adoption                |   20/20 |    1.000 |    1.000 | 176.940 | 689,054 |
+- `prompt.txt`: exact classification prompt
+- `input/candidates.csv`: the 20 revision-pinned inputs
+- `initial_results.jsonl`: unmodified initial results
+- `retry_result.jsonl`: unmodified Azure retry result
+- `final_results.jsonl`: final 20 results after the documented replacement
+- `run_configuration.json`: initial and retry configurations and merge rule
+- `summary.json`: final distribution and aggregate usage
 
-v4 limits unnamed-tool `review` decisions to mandatory compliance and requires
-quotes to preserve line breaks exactly. v5 counts a named formatter or linter
-adoption statement in an explicit contributor code-style section while still
-excluding badges, command lists, and optional tool suggestions. No repository
-names or repository-specific examples appear in a prompt.
-
-The stopping rule was accuracy 1.0 or no improvement from a generalized prompt
-revision. v5 reached the finite-sample ceiling.
-
-Contract hashes, confusion matrices, elapsed times, token usage, and limitations
-are recorded in `results.json`. Historical prompt texts and reproduction
-commands are not retained; only the active classifier contract is supported.
-
-## Interpretation
-
-This is a calibration result, not an unbiased generalization estimate. All 20
-cases influenced prompt development, only two cases have `review` labels, and
-each prompt uses one stochastic model call per repository. A new untouched and
-larger evaluation set is required before reporting final classifier accuracy.
+This pilot records model predictions, not classifier accuracy. It has no
+manually adjudicated gold labels. License fields in the raw records are
+retained as execution provenance but are not part of this guideline result.

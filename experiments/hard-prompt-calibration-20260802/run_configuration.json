@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "initial": {
+    "checkout_timeout_seconds": 300,
+    "classification_contract_sha256": "8c077d5ffe1cdeaeac9884477d61757e49306db756cbfd7567baa360a927e85c",
+    "codex_command": "codex",
+    "filter_order": [
+      "project_guideline",
+      "osi_approved_license"
+    ],
+    "git_command": "git",
+    "input_sha256": {
+      "candidates.csv": "6517bd70972e779f6687176e5fec3aaa9173fc837b3d1c61c5aadb9cb5f8eb32"
+    },
+    "license_source": "SPDX License List 3.28.0 isOsiApproved",
+    "model": "gpt-5.6-luna",
+    "model_timeout_seconds": 900,
+    "provider": "codex-cli",
+    "reasoning_effort": "max",
+    "schema_version": 1,
+    "workers": 4
+  },
+  "retry": {
+    "checkout_timeout_seconds": 900,
+    "classification_contract_sha256": "8c077d5ffe1cdeaeac9884477d61757e49306db756cbfd7567baa360a927e85c",
+    "codex_command": "codex",
+    "filter_order": [
+      "project_guideline",
+      "osi_approved_license"
+    ],
+    "git_command": "git",
+    "input_sha256": {
+      "candidates.csv": "9f5c56b0220b47ceffaa91b531213f8fb9b796fd877139a27d64a4cf795529a3"
+    },
+    "license_source": "SPDX License List 3.28.0 isOsiApproved",
+    "model": "gpt-5.6-luna",
+    "model_timeout_seconds": 900,
+    "provider": "codex-cli",
+    "reasoning_effort": "max",
+    "schema_version": 1,
+    "workers": 1
+  },
+  "merge": {
+    "repository": "Azure/Azure-Sentinel",
+    "revision": "e7ce9ee909eb15cd52611ec1a664846991459d26",
+    "strategy": "replace the initial model_error classification with the successful retry while preserving input_index 13"
+  }
+}
