@@ -12,7 +12,8 @@ The filter processes repositories in this order:
 2. Materialize that exact revision from the HDD cache in a disposable SSD
    workspace without Git metadata or network access.
 3. Run Codex CLI in a restricted container to search the complete snapshot for
-   project guidelines for developers modifying source code or tests.
+   natural-language rules or policies about writing or changing source code or
+   tests.
 4. Verify every `pass` quote at its reported path and preserve every verified
    guideline file as an output artifact.
 
@@ -120,7 +121,7 @@ Each run materializes:
 
 - `all_classified.csv`: all latest processed results
 - `guideline_review.csv`: guideline non-passes and errors
-- `selected_repositories.csv`: guideline passes for manual license review
+- `selected_repositories.csv`: guideline candidates for manual scope and license review
 - `guideline_files.csv`: one row for every verified guideline file
 - `guideline-files/`: exact copies of all verified guideline files
 - `summary.json`: status counts, model calls, stage timings, and model token usage

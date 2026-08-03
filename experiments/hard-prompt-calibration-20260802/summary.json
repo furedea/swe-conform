@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "classification_contract_sha256": "8c077d5ffe1cdeaeac9884477d61757e49306db756cbfd7567baa360a927e85c",
+  "repositories": 20,
+  "model_calls": 21,
+  "guideline_status": {
+    "pass": 16,
+    "review": 3,
+    "not_found": 1
+  },
+  "retry": {
+    "repository": "Azure/Azure-Sentinel",
+    "initial_status": "model_error",
+    "final_status": "pass"
+  },
+  "usage": {
+    "input_tokens": 3386956,
+    "output_tokens": 53107,
+    "total_tokens": 3440063
+  }
+}
