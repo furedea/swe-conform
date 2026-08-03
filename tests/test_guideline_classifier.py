@@ -126,6 +126,41 @@ def test_checker_downgrades_unverifiable_pass_to_review(
     assert "verified" in result.reason
 
 
+def test_checker_normalizes_verified_evidence_paths(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    document_path = repository_path / "CONTRIBUTING.md"
+    document_path.write_text("Changes must preserve API compatibility.\n", encoding="utf-8")
+    workspace = mocker.Mock(spec=repository_workspace.GitRepositoryWorkspace)
+    workspace.checkout.return_value = nullcontext(tmp_path)
+    model_client = mocker.Mock(spec=guideline_classifier.StructuredModelClient)
+    model_client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value={
+            "status": "pass",
+            "evidence": [
+                {
+                    "path": "docs/../CONTRIBUTING.md",
+                    "quote": "Changes must preserve API compatibility.",
+                },
+            ],
+        },
+        usage=guideline.TokenUsage(),
+    )
+    checker = guideline_classifier.ModelGuidelineChecker(
+        workspace=workspace,
+        model_client=model_client,
+        model="gpt-5.6-luna",
+    )
+
+    result = checker.check(_candidate())
+
+    assert result.status is guideline.GuidelineStatus.PASS
+    assert [evidence.path for evidence in result.evidence] == ["CONTRIBUTING.md"]
+
+
 def test_checker_reviews_not_found_with_any_evidence(
     mocker: pytest_mock.MockerFixture,
     tmp_path: Path,
