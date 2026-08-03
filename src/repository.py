@@ -4,12 +4,15 @@ import csv
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REVISION_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
-_REQUIRED_COLUMNS = frozenset({"name", "lastCommitSHA", "license"})
+_REQUIRED_COLUMNS = frozenset({"name", "lastCommitSHA", "lastCommit", "defaultBranch", "license"})
+SNAPSHOT_START = datetime(2026, 1, 1, tzinfo=UTC)
+SNAPSHOT_CUTOFF = datetime(2026, 8, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,7 @@ def _candidate_from_row(
     if not _REVISION_PATTERN.fullmatch(revision):
         msg = f"Repository revision must be a hexadecimal commit SHA: {revision!r}"
         raise ValueError(msg)
+    _validate_snapshot_committed_at(fields["lastCommit"], repository=repository)
     return RepositoryCandidate(
         repository=repository,
         revision=revision,
@@ -80,3 +84,21 @@ def _candidate_from_row(
         input_index=input_index,
         fields=MappingProxyType(fields),
     )
+
+
+def _validate_snapshot_committed_at(raw_value: str, *, repository: str) -> None:
+    try:
+        committed_at = datetime.fromisoformat(raw_value)
+    except ValueError as error:
+        msg = f"Repository lastCommit must be an ISO 8601 timestamp: {repository}: {raw_value!r}"
+        raise ValueError(msg) from error
+    if committed_at.tzinfo is None:
+        committed_at = committed_at.replace(tzinfo=UTC)
+    committed_at = committed_at.astimezone(UTC)
+    if committed_at < SNAPSHOT_START:
+        msg = f"Repository commit is before the 2026-01-01 UTC snapshot start: {repository}: {raw_value}"
+        raise ValueError(msg)
+    if committed_at < SNAPSHOT_CUTOFF:
+        return
+    msg = f"Repository commit is outside the 2026-07-31 UTC snapshot cutoff: {repository}: {raw_value}"
+    raise ValueError(msg)

@@ -2,85 +2,100 @@
 
 ## Scope
 
-The filter selects repositories that contain concrete project coding
-guidelines and have a recognized OSI-approved software license. It intentionally
-favors precision over recall. All repository evidence is evaluated at the
-candidate CSV's `lastCommitSHA` rather than the moving default branch.
+The filter selects repositories that contain an explicit project guideline for
+developers modifying source code or tests. It intentionally favors precision
+over recall. All repository evidence is evaluated at the candidate CSV's
+`lastCommitSHA` rather than the moving default branch.
 
 ## Stage 1: Project coding guideline
 
-The GitHub recursive tree API provides file paths and blob identifiers for the
-pinned revision. Deterministic path rules rank up to 12 likely documents. The
-selector considers root and documentation files associated with contributing,
-development, coding style, style guides, hacking, guidelines, and README files.
+The acquisition stage fetches the candidate CSV's exact `lastCommitSHA` into a
+persistent bare repository cache. It uses neither shallow history nor partial
+clone filters, so the cache contains the commit ancestry, trees, and ordinary
+blobs reachable from the snapshot revision. It does not fetch descendants of
+that revision. Input timestamps outside
+`[2026-01-01T00:00:00Z, 2026-08-01T00:00:00Z)` are rejected.
 
-The selector excludes generated, vendored, third-party, fixture, snapshot, and
-test-data directories. It also excludes agent instruction files, changelogs,
-codes of conduct, release documents, and security policies. Files larger than
-200,000 bytes are not sent to the model.
+The classification stage makes a shared local clone from the HDD cache into a
+disposable SSD workspace, checks out the exact revision, and removes its Git
+metadata before Codex starts. Codex CLI starts in the workspace root, with the
+source snapshot nested under `repository/`, and searches the complete snapshot
+instead of receiving a path-ranked document subset. No repository download
+occurs during this cache-backed classification stage.
 
-When candidate documents exist, the filter makes one structured model call per
-repository. The default provider is the OpenAI Responses API. The optional
-Codex CLI provider runs in a temporary empty directory with user configuration,
-rules, persistence, and project instructions disabled. Both providers default
-to `gpt-5.6-luna`; Codex defaults to maximum reasoning effort. The request uses
-strict JSON Schema with these outcomes:
+The direct-download workspace remains available for small pilots. The research
+run uses the cache-backed workspace so network acquisition and model exploration
+are separate experimental stages.
 
-- `pass`: a concrete normative rule applies to implementing or modifying source
-  code or tests
-- `review`: evidence is ambiguous or incomplete
-- `not_found`: supplied documents contain no qualifying rule
+Codex uses `gpt-5.6-luna` with maximum reasoning effort. Each invocation runs
+inside a disposable Docker container with a read-only root filesystem, dropped
+Linux capabilities, no privilege escalation, and a process limit. The host
+mounts only the source snapshot as read-only, a temporary output directory,
+and a temporary Codex home containing selected runtime authentication files.
+The real user home and Docker socket are not mounted.
 
-Formatting, linting, naming, imports, type usage, compatibility, source
-structure, function, method, class, and test-authoring requirements qualify. A
-requirement to add tests for implementation changes qualifies, as does an
-explicitly required and named external coding standard. Merely running existing
-checks does not qualify.
+Every model-generated command runs through the image's system bubblewrap. The
+Codex-bundled bubblewrap is removed at image build time, and no Landlock or
+unsandboxed fallback is configured. A fixed permission profile extends Codex's
+read-only profile, disables approvals, and denies tool reads of the temporary
+Codex home. Browser, plugin, skill-search, multi-agent, memory, and other
+optional harness features are disabled. The shell inherits only Codex's core
+environment.
 
-Contribution workflow, issue and pull-request process, commit messages, release
-notes, documentation-only style, license terms, security reporting, consumer API
-documentation, and vague requests to follow existing style do not qualify.
-Tool badges and metadata are not contributor requirements.
+Before any repository submission, preflight verifies the system bubblewrap
+binary, a Codex sandbox launch, repository reads, repository write denial,
+credential read denial, and direct network denial. Any failed probe aborts the
+batch. The outer container retains network connectivity for Codex model
+requests, while bubblewrap gives model-generated tools a separate network
+namespace. The prompt independently treats every repository file as untrusted
+evidence and prohibits file changes and network access.
 
-An unnamed mandatory linter or formatter is `review` unless the document states
-a concrete rule. A linked but unavailable developer, coding, or style guide is
-also `review`. Generic contribution, setup, and build links do not create that
-uncertainty and remain `not_found` when no qualifying rule exists.
+The request uses strict JSON Schema with two outcomes:
 
-A model `pass` must include a repository path and a verbatim quote. The filter
-downgrades the result to `review` if the path was not retrieved or the quote is
-not an exact substring of that document. A `not_found` result from a truncated
-Git tree is also downgraded to `review`.
+- `pass`: the repository contains an explicit project guideline for developers
+  modifying its source code or tests
+- `not_found`: no qualifying document can be verified after repository-wide
+  exploration
 
-## Stage 2: OSS license
+General coding style that applies unchanged to arbitrary projects does not
+qualify. Formatter or linter use and references to external standards do not
+qualify by themselves. The classifier does not infer documentation from source
+code or configuration.
 
-Only guideline `pass` rows enter this stage. GitHub's license label is mapped to
-an SPDX identifier using the labels present in the candidate dataset. The
-mapping is pinned to SPDX License List 3.28.0.
+A model `pass` must include one evidence item for every qualifying file it
+finds. Each item contains a repository-root-relative path and a verbatim quote.
+The filter downgrades the result to internal `review` if any path is duplicated,
+escapes the snapshot, is not a file, or does not contain the quote as an exact
+substring. Every verified file is copied byte-for-byte into the run output.
 
-- `pass`: the SPDX entry has `isOsiApproved=true`
-- `exclude_non_osi`: SPDX recognizes the license without OSI approval
-- `review_unrecognized`: the label is empty, `Other`, or unknown
-- `not_evaluated`: the guideline stage did not pass
-
-Unrecognized licenses are not assumed to be open source.
+License metadata from the candidate CSV is preserved unchanged in output
+reports. It is not classified and cannot exclude a repository. License
+eligibility is reviewed manually after project-guideline classification.
 
 ## Reproducibility and recovery
 
-The run configuration records the model, reasoning effort, API base URLs,
-document limit, filter order, SPDX source, SHA-256 digest of every input CSV,
-and a SHA-256 digest of the classification prompt and schema. The output
-directory cannot be resumed with a conflicting configuration.
+The run configuration records the model, reasoning effort, Codex runtime,
+Docker image tag and content ID, Codex and Git commands, worker count, snapshot
+cutoff, repository source, workspace roots, checkout and model timeouts, filter
+order, SHA-256 digest of every input CSV, and a SHA-256 digest of the
+classification prompt and schema. The output directory cannot be resumed with
+a conflicting configuration.
+
+Repository evaluations run in a fixed-size thread pool. Each worker launches
+its own Git and Codex CLI subprocesses. The default worker count is four and can
+be changed with `--workers`. Each checkout has a 900-second timeout by default.
 
 An append-only JSONL checkpoint is written after each repository. Reports use
 the latest record for a repository revision and restore the original input
-order. Retrieval and model errors remain retryable on later runs. `summary.json`
-records aggregate input, output, and total model token usage.
+order. Retrieval and model errors remain retryable on later runs. Each result
+records separate checkout and model elapsed seconds. `summary.json` records
+their sums and aggregate input, output, and total model token usage.
 
 ## Limitations
 
-The deterministic document selector can miss rules stored under unrelated file
-names or only on external websites. Large documents are represented by bounded
-head and tail excerpts in the model request. The one-shot classifier should be
-validated against an independently labeled sample before its outputs are used
-as benchmark ground truth.
+The agent can still miss guidelines or misclassify their scope. Network access
+is disabled, so evidence available only on external websites cannot qualify.
+Results should be validated against an independently labeled sample before
+they are used as benchmark ground truth. Git LFS payloads and submodule working
+trees are not materialized; ordinary Git blobs and the pinned repository's own
+working tree are the inspection boundary.

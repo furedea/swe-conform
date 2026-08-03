@@ -1,12 +1,12 @@
 """Tests for concurrent and resumable batch execution."""
 
+import threading
 from pathlib import Path
 
 import pytest_mock
 
 import batch_runner
 import guideline
-import license_filter
 import pipeline
 import repository
 import result_store
@@ -32,7 +32,6 @@ def _result(candidate: repository.RepositoryCandidate) -> pipeline.RepositoryRes
             status=guideline.GuidelineStatus.NOT_FOUND,
             reason="No candidate document found",
         ),
-        license=license_filter.LicenseResult(status=license_filter.LicenseStatus.NOT_EVALUATED),
     )
 
 
@@ -51,3 +50,25 @@ def test_batch_runner_skips_checkpointed_repository(mocker: pytest_mock.MockerFi
     assert stats.requested == 2
     assert stats.skipped == 1
     assert stats.evaluated == 1
+
+
+def test_batch_runner_evaluates_configured_workers_concurrently(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidates = (_candidate(0), _candidate(1))
+    store = result_store.ResultStore(tmp_path / "output", configuration={"workers": 2})
+    store.initialize()
+    rendezvous = threading.Barrier(2)
+
+    def evaluate(candidate: repository.RepositoryCandidate) -> pipeline.RepositoryResult:
+        rendezvous.wait(timeout=5)
+        return _result(candidate)
+
+    repository_filter = mocker.Mock(spec=pipeline.RepositoryFilter)
+    repository_filter.evaluate.side_effect = evaluate
+    runner = batch_runner.BatchRunner(repository_filter=repository_filter, workers=2)
+
+    stats = runner.run(candidates, store)
+
+    assert stats.evaluated == 2

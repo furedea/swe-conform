@@ -19,6 +19,7 @@ testpaths = ["tests"]
 ignore_notebooks = true
 known_first_party = [
   "batch_runner",
+  "cache_runner",
   "calibration",
   "codex_cli_client",
   "evidence_export",
@@ -26,11 +27,12 @@ known_first_party = [
   "guideline",
   "guideline_classifier",
   "guideline_evidence",
-  "license_filter",
   "main",
   "openai_responses_client",
   "pipeline",
   "repository",
+  "repository_cache",
+  "repository_workspace",
   "result_store",
 ]
 
@@ -139,6 +141,7 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = [
   "batch_runner",
+  "cache_runner",
   "calibration",
   "codex_cli_client",
   "evidence_export",
@@ -146,11 +149,12 @@ known-first-party = [
   "guideline",
   "guideline_classifier",
   "guideline_evidence",
-  "license_filter",
   "main",
   "openai_responses_client",
   "pipeline",
   "repository",
+  "repository_cache",
+  "repository_workspace",
   "result_store",
 ]
 

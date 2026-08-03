@@ -27,16 +27,26 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class GuidelineEvidence:
+    """One verified guideline file and the quote that identified it."""
+
+    path: str
+    quote: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class GuidelineResult:
     """Evidence-backed classification of a repository guideline."""
 
     status: GuidelineStatus
     reason: str
-    evidence_path: str = ""
-    evidence_quote: str = ""
+    evidence: tuple[GuidelineEvidence, ...] = ()
     candidate_count: int = 0
     tree_truncated: bool = False
     model_called: bool = False
+    checkout_seconds: float = 0.0
+    model_seconds: float = 0.0
     usage: TokenUsage = TokenUsage()
 
 
