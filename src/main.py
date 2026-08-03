@@ -24,7 +24,7 @@ _DEFAULT_INPUT_DIR = Path("docs/data/repository-candidates-new")
 _DEFAULT_OUTPUT_DIR = Path("output/repository-selection")
 _DEFAULT_FETCH_RESULT_PATH = Path("output/repository-cache/fetch_results.jsonl")
 _DEFAULT_MODEL = "gpt-5.6-luna"
-_DEFAULT_CODEX_IMAGE = "swe-guideline-refactor-codex:0.146.0"
+_DEFAULT_CODEX_IMAGE = "swe-conform-codex:0.146.0"
 _DEFAULT_WORKERS = 4
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="swe-guideline-refactor")
+    parser = argparse.ArgumentParser(prog="swe-conform")
     subparsers = parser.add_subparsers(dest="command")
 
     validate_parser = subparsers.add_parser("validate", help="Validate repository candidate CSV files")

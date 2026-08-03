@@ -104,7 +104,7 @@ def test_docker_client_exposes_only_the_snapshot_outputs_and_temporary_codex_hom
     run = mocker.patch("codex_cli_client.subprocess.run", autospec=True, side_effect=run_side_effect)
     client = codex_cli_client.DockerCodexCliClient(
         docker_command="docker",
-        image="swe-guideline-refactor-codex:0.146.0",
+        image="swe-conform-codex:0.146.0",
         source_codex_home=source_codex_home,
         workspace_root=tmp_path,
     )
@@ -135,8 +135,8 @@ def test_docker_client_exposes_only_the_snapshot_outputs_and_temporary_codex_hom
     assert 'extends = ":read-only"' in runtime_config
     assert '"/runtime-home/.codex" = "deny"' in runtime_config
     assert captured_schema == {"type": "object"}
-    assert "swe-guideline-refactor-codex:0.146.0" in command
-    image_index = command.index("swe-guideline-refactor-codex:0.146.0")
+    assert "swe-conform-codex:0.146.0" in command
+    image_index = command.index("swe-conform-codex:0.146.0")
     assert command[image_index + 1 : image_index + 3] == ["exec", "--strict-config"]
     assert "use_legacy_landlock" not in command
     assert "--sandbox" not in command
@@ -174,7 +174,7 @@ def test_docker_preflight_verifies_bwrap_filesystem_credentials_and_network(
         ),
     )
     client = codex_cli_client.DockerCodexCliClient(
-        image="swe-guideline-refactor-codex:0.146.0",
+        image="swe-conform-codex:0.146.0",
         source_codex_home=source_codex_home,
         workspace_root=tmp_path,
     )
@@ -190,7 +190,7 @@ def test_docker_preflight_verifies_bwrap_filesystem_credentials_and_network(
         assert "--read-only" in command
         assert command[command.index("--cap-drop") + 1] == "ALL"
         assert command[command.index("--security-opt") + 1] == "no-new-privileges:true"
-        image_index = command.index("swe-guideline-refactor-codex:0.146.0")
+        image_index = command.index("swe-conform-codex:0.146.0")
         assert command[image_index + 1 : image_index + 4] == ["sandbox", "-P", "guideline-readonly"]
         assert "--sandbox-state-disable-network" in command
         assert "use_legacy_landlock" not in command
@@ -214,7 +214,7 @@ def test_docker_preflight_fails_closed_when_system_bwrap_is_unavailable(
         return_value=CompletedProcess(args=[], returncode=127, stdout="", stderr="bwrap not found"),
     )
     client = codex_cli_client.DockerCodexCliClient(
-        image="swe-guideline-refactor-codex:0.146.0",
+        image="swe-conform-codex:0.146.0",
         source_codex_home=source_codex_home,
         workspace_root=tmp_path,
     )

@@ -102,7 +102,7 @@ class CodexCliClient:
         """Return one schema-constrained Codex CLI response."""
         _ = max_output_tokens, schema_name
         with tempfile.TemporaryDirectory(
-            prefix="swe-guideline-refactor-codex-",
+            prefix="swe-conform-codex-",
             dir=self._workspace_root,
         ) as workspace:
             workspace_path = Path(workspace)
@@ -238,7 +238,7 @@ class DockerCodexCliClient:
         """Return one schema-constrained response from an isolated container."""
         _ = max_output_tokens, schema_name
         with tempfile.TemporaryDirectory(
-            prefix="swe-guideline-refactor-docker-codex-",
+            prefix="swe-conform-docker-codex-",
             dir=self._workspace_root,
         ) as temporary_directory:
             temporary_path = Path(temporary_directory)
@@ -249,7 +249,7 @@ class DockerCodexCliClient:
             schema_path = output_path / "output_schema.json"
             last_message_path = output_path / "last_message.json"
             schema_path.write_text(json.dumps(schema, ensure_ascii=True, sort_keys=True), encoding="utf-8")
-            container_name = f"swe-guideline-refactor-{uuid.uuid4().hex}"
+            container_name = f"swe-conform-{uuid.uuid4().hex}"
             command = self._command_arguments(
                 container_name=container_name,
                 model=model,
@@ -293,7 +293,7 @@ class DockerCodexCliClient:
     def preflight(self) -> None:
         """Fail unless the complete Docker and bubblewrap boundary is enforced."""
         with tempfile.TemporaryDirectory(
-            prefix="swe-guideline-refactor-docker-preflight-",
+            prefix="swe-conform-docker-preflight-",
             dir=self._workspace_root,
         ) as temporary_directory:
             temporary_path = Path(temporary_directory)
@@ -340,7 +340,7 @@ class DockerCodexCliClient:
                 raise CodexSandboxError(_preflight_error("Tool network sandbox is not enforced", network_result))
 
     def _run_bwrap_probe(self, runtime_home: Path) -> subprocess.CompletedProcess[str]:
-        container_name = f"swe-guideline-bwrap-preflight-{uuid.uuid4().hex}"
+        container_name = f"swe-conform-bwrap-preflight-{uuid.uuid4().hex}"
         command = [
             *self._container_arguments(container_name, runtime_home),
             "--entrypoint",
@@ -399,7 +399,7 @@ class DockerCodexCliClient:
         working_directory: Path,
         probe: list[str],
     ) -> subprocess.CompletedProcess[str]:
-        container_name = f"swe-guideline-preflight-{uuid.uuid4().hex}"
+        container_name = f"swe-conform-preflight-{uuid.uuid4().hex}"
         command = [
             *self._container_arguments(container_name, runtime_home),
             "--mount",
