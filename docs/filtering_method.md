@@ -2,12 +2,14 @@
 
 ## Scope
 
-The filter selects repositories that contain an explicit project guideline for
-developers modifying source code or tests. It intentionally favors precision
-over recall. All repository evidence is evaluated at the candidate CSV's
-`lastCommitSHA` rather than the moving default branch.
+The automated filter selects repositories that contain natural-language rules
+or policies about writing, modifying, or organizing source code or tests. It
+intentionally screens broadly for subsequent human review. Human reviewers
+decide whether the guidance is specific to the project. All repository evidence
+is evaluated at the candidate CSV's `lastCommitSHA` rather than the moving
+default branch.
 
-## Stage 1: Project coding guideline
+## Stage 1: Guideline candidate screening
 
 The acquisition stage fetches the candidate CSV's exact `lastCommitSHA` into a
 persistent bare repository cache. It uses neither shallow history nor partial
@@ -52,25 +54,28 @@ evidence and prohibits file changes and network access.
 
 The request uses strict JSON Schema with two outcomes:
 
-- `pass`: the repository contains an explicit project guideline for developers
-  modifying its source code or tests
-- `not_found`: no qualifying document can be verified after repository-wide
+- `pass`: the repository contains at least one file with natural-language rules
+  or policies about writing, modifying, or organizing its source code or tests
+- `not_found`: no qualifying file can be verified after repository-wide
   exploration
 
-General coding style that applies unchanged to arbitrary projects does not
-qualify. Formatter or linter use and references to external standards do not
-qualify by themselves. The classifier does not infer documentation from source
-code or configuration.
+The model does not decide whether guidance is project-specific or reusable
+across unrelated projects. That distinction belongs to human scope review. The
+classifier does not infer unstated guidance from source code or configuration.
+It searches without limiting candidate file names or locations in advance and
+uses the title, headings, introduction, and body when interpreting a file.
 
 A model `pass` must include one evidence item for every qualifying file it
-finds. Each item contains a repository-root-relative path and a verbatim quote.
-The filter downgrades the result to internal `review` if any path is duplicated,
-escapes the snapshot, is not a file, or does not contain the quote as an exact
-substring. Every verified file is copied byte-for-byte into the run output.
+finds. Each item contains a repository-root-relative path and one short,
+self-contained verbatim quote that supports the file classification; it does
+not enumerate every rule in the file. The filter downgrades the result to
+internal `review` if any path is duplicated, escapes the snapshot, is not a
+file, or does not contain the quote as an exact substring. Every verified file
+is copied byte-for-byte into the run output.
 
 License metadata from the candidate CSV is preserved unchanged in output
-reports. It is not classified and cannot exclude a repository. License
-eligibility is reviewed manually after project-guideline classification.
+reports. It is not classified and cannot exclude a repository. Project scope
+and license eligibility are reviewed manually after automated classification.
 
 ## Reproducibility and recovery
 
