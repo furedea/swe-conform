@@ -91,6 +91,7 @@ def test_cache_contains_snapshot_ancestors_but_not_later_descendants(tmp_path: P
     (origin / "source.txt").write_text("second\n", encoding="utf-8")
     _git("commit", "--quiet", "-am", "second", cwd=origin)
     snapshot_revision = _git("rev-parse", "HEAD", cwd=origin).stdout.strip()
+    _git("update-ref", f"refs/snapshots/{snapshot_revision}", snapshot_revision, cwd=origin)
     (origin / "source.txt").write_text("later\n", encoding="utf-8")
     _git("commit", "--quiet", "-am", "later", cwd=origin)
     later_revision = _git("rev-parse", "HEAD", cwd=origin).stdout.strip()
@@ -99,7 +100,7 @@ def test_cache_contains_snapshot_ancestors_but_not_later_descendants(tmp_path: P
     cache_path = cache.path("example/project")
     cache_path.parent.mkdir(parents=True)
     _git("init", "--bare", "--quiet", str(cache_path))
-    _git("--git-dir", str(cache_path), "remote", "add", "origin", str(origin))
+    _git("--git-dir", str(cache_path), "remote", "add", "origin", origin.as_uri())
 
     cache.ensure_snapshot("example/project", snapshot_revision)
 
