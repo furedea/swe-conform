@@ -17,6 +17,10 @@ def test_main() -> None:
     main.main([])
 
 
+def test_command_is_named_swe_conform() -> None:
+    assert main._parser().prog == "swe-conform"
+
+
 def test_codex_cli_provider_defaults_to_max_reasoning_effort() -> None:
     assert main.effective_reasoning_effort(provider="codex-cli", configured=None) == "max"
 
@@ -33,7 +37,7 @@ def test_filter_runs_codex_in_the_pinned_docker_image_by_default() -> None:
     client = main._model_client(arguments)
 
     assert arguments.codex_runtime == "docker"
-    assert arguments.codex_image == "swe-guideline-refactor-codex:0.146.0"
+    assert arguments.codex_image == "swe-conform-codex:0.146.0"
     assert isinstance(client, codex_cli_client.DockerCodexCliClient)
 
 
@@ -49,7 +53,7 @@ def test_docker_image_id_returns_the_local_content_digest(mocker: MockerFixture)
         ),
     )
 
-    image_id = main.docker_image_id("docker", "swe-guideline-refactor-codex:0.146.0")
+    image_id = main.docker_image_id("docker", "swe-conform-codex:0.146.0")
 
     assert image_id == "sha256:7ee758b81b82"
     run.assert_called_once_with(
@@ -59,7 +63,7 @@ def test_docker_image_id_returns_the_local_content_digest(mocker: MockerFixture)
             "inspect",
             "--format",
             "{{.Id}}",
-            "swe-guideline-refactor-codex:0.146.0",
+            "swe-conform-codex:0.146.0",
         ],
         capture_output=True,
         text=True,
@@ -126,12 +130,12 @@ def test_preflight_command_checks_the_configured_docker_image(
 
     client.assert_called_once_with(
         docker_command="docker",
-        image="swe-guideline-refactor-codex:0.146.0",
+        image="swe-conform-codex:0.146.0",
         source_codex_home=None,
     )
     client.return_value.preflight.assert_called_once_with()
     assert json.loads(capsys.readouterr().out) == {
-        "codex_image": "swe-guideline-refactor-codex:0.146.0",
+        "codex_image": "swe-conform-codex:0.146.0",
         "codex_image_id": "sha256:image",
         "sandbox": "ready",
     }

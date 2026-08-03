@@ -1,4 +1,4 @@
-# SWE Guideline Refactor
+# swe-conform
 
 This repository builds a reusable candidate set for evaluating coding agents on
 project guidelines and refactoring tasks.
@@ -42,7 +42,7 @@ Build the pinned exploration image once on each execution host:
 ```bash
 docker build \
   --file docker/codex.Dockerfile \
-  --tag swe-guideline-refactor-codex:0.146.0 \
+  --tag swe-conform-codex:0.146.0 \
   docker
 
 uv run --frozen python src/main.py preflight
@@ -75,15 +75,15 @@ HDD:
 
 ```bash
 uv run --frozen python src/main.py fetch \
-  --cache-root /mnt/hdd/swe-guideline-repositories
+  --cache-root /mnt/hdd/swe-conform-repositories
 ```
 
 Then run the complete dataset with temporary workspaces on the SSD:
 
 ```bash
 uv run --frozen python src/main.py filter \
-  --cache-root /mnt/hdd/swe-guideline-repositories \
-  --workspace-root /mnt/ssd/swe-guideline-workspaces \
+  --cache-root /mnt/hdd/swe-conform-repositories \
+  --workspace-root /mnt/ssd/swe-conform-workspaces \
   --output-dir output/repository-selection
 ```
 

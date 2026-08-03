@@ -36,7 +36,7 @@ class GitRepositoryWorkspace:
     @contextmanager
     def checkout(self, repository: str, revision: str) -> Iterator[Path]:
         """Yield a workspace containing a detached source snapshot."""
-        with tempfile.TemporaryDirectory(prefix="swe-guideline-repository-", dir=self._root) as workspace:
+        with tempfile.TemporaryDirectory(prefix="swe-conform-repository-", dir=self._root) as workspace:
             workspace_path = Path(workspace)
             repository_path = workspace_path / "repository"
             _run_git([self._command, "init", "--quiet", str(repository_path)], self._timeout_seconds)
@@ -106,7 +106,7 @@ class CachedGitRepositoryWorkspace:
         if not cache_path.is_dir():
             msg = f"Repository cache is missing: {cache_path}"
             raise RepositoryCheckoutError(msg)
-        with tempfile.TemporaryDirectory(prefix="swe-guideline-repository-", dir=self._root) as workspace:
+        with tempfile.TemporaryDirectory(prefix="swe-conform-repository-", dir=self._root) as workspace:
             workspace_path = Path(workspace)
             repository_path = workspace_path / "repository"
             _run_git(
