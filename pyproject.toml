@@ -1,10 +1,12 @@
 [project]
-name = "template-python"
+name = "swe-guideline-refactor"
 version = "0.1.0"
 description = ""
 readme = "README.md"
 requires-python = "== 3.14.*"
-dependencies = []
+dependencies = [
+  "httpx==0.28.1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -15,6 +17,24 @@ testpaths = ["tests"]
 
 [tool.deptry]
 ignore_notebooks = true
+known_first_party = [
+  "batch_runner",
+  "cache_runner",
+  "calibration",
+  "codex_cli_client",
+  "evidence_export",
+  "github_client",
+  "guideline",
+  "guideline_classifier",
+  "guideline_evidence",
+  "main",
+  "openai_responses_client",
+  "pipeline",
+  "repository",
+  "repository_cache",
+  "repository_workspace",
+  "result_store",
+]
 
 [tool.vulture]
 paths = ["src", "tests"]
@@ -116,6 +136,26 @@ ignore = [
   "E111",
   "E114",
   "E117",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+  "batch_runner",
+  "cache_runner",
+  "calibration",
+  "codex_cli_client",
+  "evidence_export",
+  "github_client",
+  "guideline",
+  "guideline_classifier",
+  "guideline_evidence",
+  "main",
+  "openai_responses_client",
+  "pipeline",
+  "repository",
+  "repository_cache",
+  "repository_workspace",
+  "result_store",
 ]
 
 [tool.ty.src]
