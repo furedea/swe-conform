@@ -8,6 +8,8 @@ ignore:
   - result
   - result-*
   - docs/logs
+  - "experiments/**/guideline-files"
+  - "experiments/**/manual-review"
 
   - README.md
 
