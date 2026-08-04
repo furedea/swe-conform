@@ -101,8 +101,10 @@ effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit
 experimental configuration. Each worker evaluates one repository with an
 independent Git checkout and Codex CLI process. Repository checkout has a
 15-minute timeout by default and can be changed with
-`--checkout-timeout-seconds`. HDD acquisition has a one-hour per-repository
-timeout and can be changed with `--fetch-timeout-seconds`.
+`--checkout-timeout-seconds`. Model evaluation has a 30-minute timeout by
+default and can be changed with `--model-timeout-seconds`. HDD acquisition has
+a one-hour per-repository timeout and can be changed with
+`--fetch-timeout-seconds`.
 
 The default candidate set contains 4,359 repositories whose latest recorded
 commit is between 2026-01-01 and 2026-07-31. The candidate `lastCommitSHA` is

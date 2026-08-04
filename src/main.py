@@ -89,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     filter_parser.add_argument("--cache-root", type=Path)
     filter_parser.add_argument("--workspace-root", type=Path)
     filter_parser.add_argument("--checkout-timeout-seconds", type=_positive_integer, default=900)
-    filter_parser.add_argument("--model-timeout-seconds", type=_positive_integer, default=600)
+    filter_parser.add_argument("--model-timeout-seconds", type=_positive_integer, default=1800)
     filter_parser.add_argument(
         "--allow-out-of-window-snapshots",
         action="store_false",

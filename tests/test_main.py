@@ -141,10 +141,11 @@ def test_preflight_command_checks_the_configured_docker_image(
     }
 
 
-def test_filter_allows_fifteen_minutes_for_repository_checkout() -> None:
+def test_filter_defaults_to_retry_timeouts() -> None:
     arguments = main._parser().parse_args(["filter"])
 
     assert arguments.checkout_timeout_seconds == 900
+    assert arguments.model_timeout_seconds == 1800
 
 
 def test_filter_can_replay_revision_pinned_snapshots_outside_the_collection_window() -> None:
