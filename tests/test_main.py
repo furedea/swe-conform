@@ -147,6 +147,12 @@ def test_filter_allows_fifteen_minutes_for_repository_checkout() -> None:
     assert arguments.checkout_timeout_seconds == 900
 
 
+def test_filter_can_replay_revision_pinned_snapshots_outside_the_collection_window() -> None:
+    arguments = main._parser().parse_args(["filter", "--allow-out-of-window-snapshots"])
+
+    assert arguments.enforce_snapshot_window is False
+
+
 def test_fetch_requires_hdd_cache_and_allows_one_hour_per_repository() -> None:
     arguments = main._parser().parse_args(["fetch", "--cache-root", "/mnt/hdd/repositories"])
 

@@ -90,6 +90,12 @@ def _parser() -> argparse.ArgumentParser:
     filter_parser.add_argument("--workspace-root", type=Path)
     filter_parser.add_argument("--checkout-timeout-seconds", type=_positive_integer, default=900)
     filter_parser.add_argument("--model-timeout-seconds", type=_positive_integer, default=600)
+    filter_parser.add_argument(
+        "--allow-out-of-window-snapshots",
+        action="store_false",
+        dest="enforce_snapshot_window",
+        help="Allow revision-pinned replay inputs outside the collection window",
+    )
     return parser
 
 
@@ -154,7 +160,10 @@ def _preflight(arguments: argparse.Namespace) -> None:
 
 
 def _filter(arguments: argparse.Namespace) -> None:
-    candidates = repository.load_repository_candidates(arguments.input_dir)
+    candidates = repository.load_repository_candidates(
+        arguments.input_dir,
+        enforce_snapshot_window=arguments.enforce_snapshot_window,
+    )
     workspace = _repository_workspace(arguments)
     reasoning_effort = effective_reasoning_effort(
         provider=arguments.provider,
@@ -175,6 +184,7 @@ def _filter(arguments: argparse.Namespace) -> None:
         "workers": arguments.workers,
         "snapshot_start": repository.SNAPSHOT_START.isoformat(),
         "snapshot_cutoff": repository.SNAPSHOT_CUTOFF.isoformat(),
+        "enforce_snapshot_window": arguments.enforce_snapshot_window,
         "classification_contract_sha256": guideline_classifier.contract_fingerprint(),
         "codex_runtime": arguments.codex_runtime,
         "codex_image": arguments.codex_image if arguments.codex_runtime == "docker" else None,

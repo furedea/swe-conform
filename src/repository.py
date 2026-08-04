@@ -27,18 +27,33 @@ class RepositoryCandidate:
     fields: Mapping[str, str]
 
 
-def load_repository_candidates(input_dir: Path) -> tuple[RepositoryCandidate, ...]:
+def load_repository_candidates(
+    input_dir: Path,
+    *,
+    enforce_snapshot_window: bool = True,
+) -> tuple[RepositoryCandidate, ...]:
     """Load and validate repository candidates from every CSV in a directory."""
     candidates: list[RepositoryCandidate] = []
     for input_path in sorted(input_dir.glob("*.csv")):
-        candidates.extend(_load_csv(input_path, start_index=len(candidates)))
+        candidates.extend(
+            _load_csv(
+                input_path,
+                start_index=len(candidates),
+                enforce_snapshot_window=enforce_snapshot_window,
+            ),
+        )
     if not candidates:
         msg = f"No repository candidates found in {input_dir}"
         raise ValueError(msg)
     return tuple(candidates)
 
 
-def _load_csv(input_path: Path, *, start_index: int) -> list[RepositoryCandidate]:
+def _load_csv(
+    input_path: Path,
+    *,
+    start_index: int,
+    enforce_snapshot_window: bool,
+) -> list[RepositoryCandidate]:
     with input_path.open(encoding="utf-8", newline="") as input_file:
         reader = csv.DictReader(input_file)
         _validate_columns(input_path, reader.fieldnames)
@@ -47,6 +62,7 @@ def _load_csv(input_path: Path, *, start_index: int) -> list[RepositoryCandidate
                 row,
                 source_file=input_path.name,
                 input_index=start_index + row_index,
+                enforce_snapshot_window=enforce_snapshot_window,
             )
             for row_index, row in enumerate(reader)
         ]
@@ -65,6 +81,7 @@ def _candidate_from_row(
     *,
     source_file: str,
     input_index: int,
+    enforce_snapshot_window: bool,
 ) -> RepositoryCandidate:
     fields = {key: value or "" for key, value in row.items()}
     repository = fields["name"].strip()
@@ -75,7 +92,11 @@ def _candidate_from_row(
     if not _REVISION_PATTERN.fullmatch(revision):
         msg = f"Repository revision must be a hexadecimal commit SHA: {revision!r}"
         raise ValueError(msg)
-    _validate_snapshot_committed_at(fields["lastCommit"], repository=repository)
+    _validate_snapshot_committed_at(
+        fields["lastCommit"],
+        repository=repository,
+        enforce_snapshot_window=enforce_snapshot_window,
+    )
     return RepositoryCandidate(
         repository=repository,
         revision=revision,
@@ -86,7 +107,12 @@ def _candidate_from_row(
     )
 
 
-def _validate_snapshot_committed_at(raw_value: str, *, repository: str) -> None:
+def _validate_snapshot_committed_at(
+    raw_value: str,
+    *,
+    repository: str,
+    enforce_snapshot_window: bool,
+) -> None:
     try:
         committed_at = datetime.fromisoformat(raw_value)
     except ValueError as error:
@@ -95,6 +121,8 @@ def _validate_snapshot_committed_at(raw_value: str, *, repository: str) -> None:
     if committed_at.tzinfo is None:
         committed_at = committed_at.replace(tzinfo=UTC)
     committed_at = committed_at.astimezone(UTC)
+    if not enforce_snapshot_window:
+        return
     if committed_at < SNAPSHOT_START:
         msg = f"Repository commit is before the 2026-01-01 UTC snapshot start: {repository}: {raw_value}"
         raise ValueError(msg)

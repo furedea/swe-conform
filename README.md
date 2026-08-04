@@ -110,6 +110,10 @@ the reproducible snapshot identifier. Input rows outside
 `[2026-01-01T00:00:00Z, 2026-08-01T00:00:00Z)` are rejected. Acquisition does
 not query the current moving default branch.
 
+Use `--allow-out-of-window-snapshots` only to replay a revision-pinned
+experiment whose recorded inputs predate the current collection window. The
+run configuration records whether the window was enforced.
+
 ## Resume and outputs
 
 Each repository result is appended immediately to `results.jsonl`. Re-run the

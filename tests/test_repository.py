@@ -63,6 +63,19 @@ def test_load_repository_candidates_rejects_a_snapshot_before_the_start(tmp_path
         repository.load_repository_candidates(tmp_path)
 
 
+def test_load_repository_candidates_can_replay_a_revision_outside_the_snapshot_window(tmp_path: Path) -> None:
+    input_path = tmp_path / "python.csv"
+    input_path.write_text(
+        "name,lastCommitSHA,lastCommit,defaultBranch,license\n"
+        "example/project,0123456789abcdef,2025-12-31T23:59:59,main,MIT License\n",
+        encoding="utf-8",
+    )
+
+    candidates = repository.load_repository_candidates(tmp_path, enforce_snapshot_window=False)
+
+    assert candidates[0].revision == "0123456789abcdef"
+
+
 def test_default_repository_candidates_use_the_2026_collection_interval() -> None:
     candidates = repository.load_repository_candidates(Path("docs/data/repository-candidates-new"))
 
