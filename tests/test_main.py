@@ -10,6 +10,7 @@ import batch_runner
 import cache_runner
 import codex_cli_client
 import main
+import markdown_audit
 import repository_workspace
 
 
@@ -29,6 +30,80 @@ def test_filter_defaults_to_four_concurrent_codex_processes() -> None:
     arguments = main._parser().parse_args(["filter"])
 
     assert arguments.workers == 4
+
+
+def test_markdown_audit_accepts_repeatable_agent_evidence_reports() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "audit-markdown",
+            "--input-dir",
+            "experiments/input",
+            "--output-dir",
+            "experiments/output",
+            "--evidence-csv",
+            "first/guideline_files.csv",
+            "--evidence-csv",
+            "retry/guideline_files.csv",
+        ],
+    )
+
+    assert arguments.evidence_csv == [
+        Path("first/guideline_files.csv"),
+        Path("retry/guideline_files.csv"),
+    ]
+    assert arguments.workers == 4
+    assert arguments.checkout_timeout_seconds == 900
+
+
+def test_markdown_audit_writes_the_repository_term_coverage_reports(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    load_candidates = mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=())
+    workspace = mocker.patch("main._repository_workspace", autospec=True)
+    load_evidence = mocker.patch("main.markdown_audit.load_agent_evidence", autospec=True, return_value={})
+    auditor = mocker.patch("main.markdown_audit.MarkdownAuditor", autospec=True)
+    runner = mocker.patch("main.markdown_audit.MarkdownAuditRunner", autospec=True)
+    report = markdown_audit.MarkdownAuditReport(
+        results=(),
+        stats=markdown_audit.MarkdownAuditStats(
+            requested=0,
+            completed=0,
+            errors=0,
+            elapsed_seconds=1.25,
+        ),
+    )
+    runner.return_value.run.return_value = report
+    write_reports = mocker.patch("main.markdown_audit.write_reports", autospec=True)
+    output_dir = tmp_path / "output"
+
+    main.main(
+        [
+            "audit-markdown",
+            "--input-dir",
+            "experiments/input",
+            "--output-dir",
+            str(output_dir),
+            "--evidence-csv",
+            "experiment/guideline_files.csv",
+            "--allow-out-of-window-snapshots",
+        ],
+    )
+
+    load_candidates.assert_called_once_with(Path("experiments/input"), enforce_snapshot_window=False)
+    load_evidence.assert_called_once_with([Path("experiment/guideline_files.csv")])
+    auditor.assert_called_once_with(workspace=workspace.return_value, agent_evidence={})
+    runner.assert_called_once_with(auditor=auditor.return_value, workers=4)
+    runner.return_value.run.assert_called_once_with((), limit=None)
+    write_reports.assert_called_once_with(report, output_dir)
+    assert json.loads(capsys.readouterr().out) == {
+        "completed": 0,
+        "elapsed_seconds": 1.25,
+        "errors": 0,
+        "output_dir": str(output_dir),
+        "requested": 0,
+    }
 
 
 def test_filter_runs_codex_in_the_pinned_docker_image_by_default() -> None:

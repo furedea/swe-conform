@@ -14,6 +14,7 @@ import batch_runner
 import cache_runner
 import codex_cli_client
 import guideline_classifier
+import markdown_audit
 import pipeline
 import repository
 import repository_cache
@@ -44,6 +45,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments.command == "filter":
         _filter(arguments)
+        return
+    if arguments.command == "audit-markdown":
+        _audit_markdown(arguments)
         return
     parser.print_help()
 
@@ -91,6 +95,26 @@ def _parser() -> argparse.ArgumentParser:
     filter_parser.add_argument("--checkout-timeout-seconds", type=_positive_integer, default=900)
     filter_parser.add_argument("--model-timeout-seconds", type=_positive_integer, default=1800)
     filter_parser.add_argument(
+        "--allow-out-of-window-snapshots",
+        action="store_false",
+        dest="enforce_snapshot_window",
+        help="Allow revision-pinned replay inputs outside the collection window",
+    )
+
+    audit_parser = subparsers.add_parser(
+        "audit-markdown",
+        help="List Markdown files containing configured terms and compare agent evidence",
+    )
+    audit_parser.add_argument("--input-dir", type=Path, required=True)
+    audit_parser.add_argument("--output-dir", type=Path, required=True)
+    audit_parser.add_argument("--evidence-csv", type=Path, action="append", required=True)
+    audit_parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
+    audit_parser.add_argument("--limit", type=_positive_integer)
+    audit_parser.add_argument("--git-command", default="git")
+    audit_parser.add_argument("--cache-root", type=Path)
+    audit_parser.add_argument("--workspace-root", type=Path)
+    audit_parser.add_argument("--checkout-timeout-seconds", type=_positive_integer, default=900)
+    audit_parser.add_argument(
         "--allow-out-of-window-snapshots",
         action="store_false",
         dest="enforce_snapshot_window",
@@ -221,6 +245,30 @@ def _filter(arguments: argparse.Namespace) -> None:
     finally:
         model_api.close()
     print(json.dumps(_stats_report(stats), indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _audit_markdown(arguments: argparse.Namespace) -> None:
+    candidates = repository.load_repository_candidates(
+        arguments.input_dir,
+        enforce_snapshot_window=arguments.enforce_snapshot_window,
+    )
+    workspace = _repository_workspace(arguments)
+    agent_evidence = markdown_audit.load_agent_evidence(arguments.evidence_csv)
+    auditor = markdown_audit.MarkdownAuditor(
+        workspace=workspace,
+        agent_evidence=agent_evidence,
+    )
+    runner = markdown_audit.MarkdownAuditRunner(auditor=auditor, workers=arguments.workers)
+    report = runner.run(candidates, limit=arguments.limit)
+    markdown_audit.write_reports(report, arguments.output_dir)
+    payload = {
+        "requested": report.stats.requested,
+        "completed": report.stats.completed,
+        "errors": report.stats.errors,
+        "elapsed_seconds": round(report.stats.elapsed_seconds, 3),
+        "output_dir": str(arguments.output_dir),
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
 
 def _repository_workspace(
