@@ -63,6 +63,24 @@ def test_scan_markdown_files_matches_complete_singular_and_plural_keywords(tmp_p
     )
 
 
+def test_scan_markdown_files_matches_guideline_in_singular_and_plural_forms(tmp_path: Path) -> None:
+    (tmp_path / "singular.md").write_text("Follow the project guideline.\n", encoding="utf-8")
+    (tmp_path / "plural.md").write_text("Follow the project guidelines.\n", encoding="utf-8")
+
+    matches = markdown_audit.scan_markdown_files(tmp_path)
+
+    assert matches == (
+        markdown_audit.MarkdownKeywordFile(
+            path="plural.md",
+            matched_keywords=("guideline",),
+        ),
+        markdown_audit.MarkdownKeywordFile(
+            path="singular.md",
+            matched_keywords=("guideline",),
+        ),
+    )
+
+
 def test_scan_markdown_files_reads_only_regular_md_files(tmp_path: Path) -> None:
     repository_path = tmp_path / "repository"
     repository_path.mkdir()

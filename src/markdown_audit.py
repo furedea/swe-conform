@@ -19,6 +19,7 @@ import repository_workspace
 KEYWORDS = (
     "style",
     "guide",
+    "guideline",
     "standard",
     "convention",
     "rule",
