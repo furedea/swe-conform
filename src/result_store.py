@@ -89,7 +89,7 @@ class ResultStore:
             _guideline_file_records(records),
             fieldnames=_GUIDELINE_FILE_FIELDS,
         )
-        _write_manual_review_index(self._output_dir, selected)
+        _write_manual_review_index(self._output_dir, records)
         _write_json(self._output_dir / "summary.json", _summary(records, selected))
 
     def _validate_or_write_configuration(self) -> None:
@@ -141,6 +141,11 @@ def _record_from_result(
         "guideline_file_count": len(evidence_records),
         "guideline_files_json": json.dumps(evidence_records, ensure_ascii=True, sort_keys=True),
         "unverified_evidence_count": len(result.guideline.evidence_issues),
+        "unverified_evidence_json": json.dumps(
+            _evidence_issue_records(result.guideline.evidence_issues),
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
         "model_response_path": model_response_path,
         "manual_review_path": review_path,
         "candidate_count": result.guideline.candidate_count,
@@ -166,13 +171,7 @@ def _save_model_response(result: pipeline.RepositoryResult, output_dir: Path) ->
         *_safe_parts(candidate.revision, name="revision"),
         "response.json",
     )
-    issues = [
-        {
-            "index": issue.index,
-            "reason": issue.reason,
-        }
-        for issue in result.guideline.evidence_issues
-    ]
+    issues = _evidence_issue_records(result.guideline.evidence_issues)
     audit = {
         "model_response": json.loads(raw_response),
         "unverified_evidence": issues,
@@ -183,12 +182,24 @@ def _save_model_response(result: pipeline.RepositoryResult, output_dir: Path) ->
     return artifact_path.as_posix()
 
 
+def _evidence_issue_records(
+    issues: Sequence[guideline.GuidelineEvidenceIssue],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "index": issue.index,
+            "path": issue.path,
+            "quote": issue.quote,
+            "reason": issue.reason,
+        }
+        for issue in issues
+    ]
+
+
 def _save_guideline_files(
     result: pipeline.RepositoryResult,
     output_dir: Path,
 ) -> list[dict[str, str]]:
-    if result.guideline.status is not guideline.GuidelineStatus.PASS:
-        return []
     candidate = result.candidate
     repository_parts = _safe_parts(candidate.repository, name="repository")
     revision_parts = _safe_parts(candidate.revision, name="revision")
@@ -220,7 +231,7 @@ def _save_manual_review_page(
     evidence_records: Sequence[Mapping[str, str]],
     output_dir: Path,
 ) -> str:
-    if not evidence_records:
+    if not evidence_records and not result.guideline.evidence_issues:
         return ""
     candidate = result.candidate
     review_path = _manual_review_path(candidate.repository, candidate.revision)
@@ -232,6 +243,7 @@ def _save_manual_review_page(
         f"- Repository: [{title}]({revision_url})",
         f"- Revision: [{candidate.revision}]({revision_url})",
         f"- Verified files: {len(evidence_records)}",
+        f"- Unverified evidence: {len(result.guideline.evidence_issues)}",
     ]
     for index, evidence in enumerate(evidence_records, start=1):
         path = str(evidence["path"])
@@ -248,6 +260,22 @@ def _save_manual_review_page(
                 "",
                 f"- Saved file: [open local snapshot]({local_url})",
                 f"- GitHub: [open pinned source]({evidence_url})",
+                "",
+                "### Model evidence quote",
+                "",
+                rendered_quote,
+            ),
+        )
+    for issue in result.guideline.evidence_issues:
+        rendered_path = html.escape(issue.path or "(empty path)", quote=False)
+        rendered_reason = html.escape(issue.reason, quote=False)
+        rendered_quote = _markdown_quote(issue.quote)
+        lines.extend(
+            (
+                "",
+                f"## Unverified evidence {issue.index}: {rendered_path}",
+                "",
+                f"- Verification failure: {rendered_reason}",
                 "",
                 "### Model evidence quote",
                 "",

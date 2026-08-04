@@ -139,7 +139,7 @@ def test_checker_downgrades_unverifiable_pass_to_review(
     assert "verified" in result.reason
 
 
-def test_checker_keeps_verified_evidence_when_another_item_is_unverifiable(
+def test_checker_reviews_the_result_when_any_evidence_item_is_unverifiable(
     mocker: pytest_mock.MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -174,7 +174,7 @@ def test_checker_keeps_verified_evidence_when_another_item_is_unverifiable(
 
     result = checker.check(_candidate())
 
-    assert result.status is guideline.GuidelineStatus.PASS
+    assert result.status is guideline.GuidelineStatus.REVIEW
     assert [evidence.path for evidence in result.evidence] == ["CONTRIBUTING.md"]
     assert [(issue.index, issue.reason) for issue in result.evidence_issues] == [
         (2, "path is not a file"),

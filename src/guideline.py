@@ -40,6 +40,8 @@ class GuidelineEvidenceIssue:
     """One model evidence item that could not be verified."""
 
     index: int
+    path: str
+    quote: str
     reason: str
 
 

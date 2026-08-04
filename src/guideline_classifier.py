@@ -247,7 +247,11 @@ def _result_from_response(
         status = guideline.GuidelineStatus.REVIEW
         reason = "Model pass evidence could not be verified against the repository snapshot"
     elif evidence_issues:
-        reason = f"Verified project guideline evidence with {len(evidence_issues)} unverified model evidence item(s)"
+        status = guideline.GuidelineStatus.REVIEW
+        reason = (
+            f"Model returned {len(evidence) + len(evidence_issues)} evidence items: "
+            f"{len(evidence)} verified and {len(evidence_issues)} unverified"
+        )
     else:
         reason = "Verified project guideline evidence"
     return guideline.GuidelineResult(
@@ -274,11 +278,21 @@ def _verified_evidence(
     for index, item in enumerate(raw_evidence, start=1):
         evidence, reason = _verified_evidence_item(item, root, paths)
         if evidence is None:
-            issues.append(guideline.GuidelineEvidenceIssue(index=index, reason=reason))
+            issues.append(_evidence_issue(index, item, reason))
             continue
         paths.add(evidence.path)
         verified.append(evidence)
     return tuple(verified), tuple(issues)
+
+
+def _evidence_issue(index: int, raw_item: object, reason: str) -> guideline.GuidelineEvidenceIssue:
+    item = cast(dict[str, object], raw_item) if isinstance(raw_item, dict) else {}
+    return guideline.GuidelineEvidenceIssue(
+        index=index,
+        path=str(item.get("path", "")),
+        quote=str(item.get("quote", "")),
+        reason=reason,
+    )
 
 
 def _verified_evidence_item(
