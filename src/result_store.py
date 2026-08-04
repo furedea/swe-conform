@@ -18,6 +18,7 @@ _CONFIGURATION_FILE = "run_configuration.json"
 _GUIDELINE_FILES_DIR = "guideline-files"
 _GUIDELINE_FILES_REPORT = "guideline_files.csv"
 _MANUAL_REVIEW_DIR = "manual-review"
+_MODEL_RESPONSES_DIR = "model-responses"
 _GUIDELINE_FILE_FIELDS = (
     "name",
     "lastCommitSHA",
@@ -52,9 +53,10 @@ class ResultStore:
 
     def append(self, result: pipeline.RepositoryResult) -> None:
         """Append one durable result and update the in-memory latest record."""
+        model_response_path = _save_model_response(result, self._output_dir)
         evidence_records = _save_guideline_files(result, self._output_dir)
         review_path = _save_manual_review_page(result, evidence_records, self._output_dir)
-        record = _record_from_result(result, evidence_records, review_path)
+        record = _record_from_result(result, evidence_records, review_path, model_response_path)
         checkpoint_path = self._output_dir / _CHECKPOINT_FILE
         with checkpoint_path.open("a", encoding="utf-8") as checkpoint:
             checkpoint.write(json.dumps(record, ensure_ascii=True, sort_keys=True))
@@ -121,6 +123,7 @@ def _record_from_result(
     result: pipeline.RepositoryResult,
     evidence_records: Sequence[Mapping[str, str]],
     review_path: str,
+    model_response_path: str,
 ) -> dict[str, object]:
     candidate = result.candidate
     input_units, output_units, total_units = astuple(result.guideline.usage)
@@ -137,6 +140,8 @@ def _record_from_result(
         "guideline_evidence": first_evidence.get("quote", ""),
         "guideline_file_count": len(evidence_records),
         "guideline_files_json": json.dumps(evidence_records, ensure_ascii=True, sort_keys=True),
+        "unverified_evidence_count": len(result.guideline.evidence_issues),
+        "model_response_path": model_response_path,
         "manual_review_path": review_path,
         "candidate_count": result.guideline.candidate_count,
         "tree_truncated": result.guideline.tree_truncated,
@@ -148,6 +153,34 @@ def _record_from_result(
         "model_seconds": round(result.guideline.model_seconds, 3),
         "selected": result.is_selected,
     }
+
+
+def _save_model_response(result: pipeline.RepositoryResult, output_dir: Path) -> str:
+    raw_response = result.guideline.model_response_json
+    if not raw_response:
+        return ""
+    candidate = result.candidate
+    artifact_path = Path(
+        _MODEL_RESPONSES_DIR,
+        *_safe_parts(candidate.repository, name="repository"),
+        *_safe_parts(candidate.revision, name="revision"),
+        "response.json",
+    )
+    issues = [
+        {
+            "index": issue.index,
+            "reason": issue.reason,
+        }
+        for issue in result.guideline.evidence_issues
+    ]
+    audit = {
+        "model_response": json.loads(raw_response),
+        "unverified_evidence": issues,
+    }
+    target_path = output_dir / artifact_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(target_path, audit)
+    return artifact_path.as_posix()
 
 
 def _save_guideline_files(

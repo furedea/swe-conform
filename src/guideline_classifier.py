@@ -236,7 +236,7 @@ def _result_from_response(
 ) -> guideline.GuidelineResult:
     status = guideline.GuidelineStatus(str(response.value["status"]))
     raw_evidence = response.value["evidence"]
-    evidence = _verified_evidence(raw_evidence, repository_path)
+    evidence, evidence_issues = _verified_evidence(raw_evidence, repository_path)
     if status is guideline.GuidelineStatus.NOT_FOUND:
         if bool(raw_evidence):
             status = guideline.GuidelineStatus.REVIEW
@@ -246,12 +246,16 @@ def _result_from_response(
     elif not evidence:
         status = guideline.GuidelineStatus.REVIEW
         reason = "Model pass evidence could not be verified against the repository snapshot"
+    elif evidence_issues:
+        reason = f"Verified project guideline evidence with {len(evidence_issues)} unverified model evidence item(s)"
     else:
         reason = "Verified project guideline evidence"
     return guideline.GuidelineResult(
         status=status,
         reason=reason,
         evidence=evidence,
+        evidence_issues=evidence_issues,
+        model_response_json=json.dumps(response.value, ensure_ascii=True, sort_keys=True),
         model_called=True,
         usage=response.usage,
     )
@@ -260,44 +264,58 @@ def _result_from_response(
 def _verified_evidence(
     raw_evidence: object,
     repository_path: Path,
-) -> tuple[guideline.GuidelineEvidence, ...]:
+) -> tuple[tuple[guideline.GuidelineEvidence, ...], tuple[guideline.GuidelineEvidenceIssue, ...]]:
     if not isinstance(raw_evidence, list):
-        return ()
+        return (), ()
     root = repository_path.resolve()
     verified: list[guideline.GuidelineEvidence] = []
+    issues: list[guideline.GuidelineEvidenceIssue] = []
     paths: set[str] = set()
-    for item in raw_evidence:
-        evidence = _verified_evidence_item(item, root, paths)
+    for index, item in enumerate(raw_evidence, start=1):
+        evidence, reason = _verified_evidence_item(item, root, paths)
         if evidence is None:
-            return ()
+            issues.append(guideline.GuidelineEvidenceIssue(index=index, reason=reason))
+            continue
         paths.add(evidence.path)
         verified.append(evidence)
-    return tuple(verified)
+    return tuple(verified), tuple(issues)
 
 
 def _verified_evidence_item(
     raw_item: object,
     root: Path,
     existing_paths: set[str],
-) -> guideline.GuidelineEvidence | None:
-    if not isinstance(raw_item, dict):
-        return None
-    item = cast(dict[str, object], raw_item)
-    path = str(item.get("path", ""))
-    quote = str(item.get("quote", ""))
-    if not path or not quote:
-        return None
+) -> tuple[guideline.GuidelineEvidence | None, str]:
+    fields, reason = _evidence_fields(raw_item)
+    if fields is None:
+        return None, reason
+    path, quote = fields
     evidence_path = (root / path).resolve()
     try:
         normalized_path = evidence_path.relative_to(root).as_posix()
     except ValueError:
-        return None
-    if normalized_path in existing_paths or not evidence_path.is_file():
-        return None
+        return None, "path resolves outside repository"
+    if normalized_path in existing_paths:
+        return None, "path duplicates another verified evidence item"
+    if not evidence_path.is_file():
+        return None, "path is not a file"
     content = evidence_path.read_bytes()
     if quote not in content.decode(encoding="utf-8", errors="replace"):
-        return None
-    return guideline.GuidelineEvidence(path=normalized_path, quote=quote, content=content)
+        return None, "quote is not an exact substring of the file"
+    return guideline.GuidelineEvidence(path=normalized_path, quote=quote, content=content), ""
+
+
+def _evidence_fields(raw_item: object) -> tuple[tuple[str, str] | None, str]:
+    if not isinstance(raw_item, dict):
+        return None, "item is not an object"
+    item = cast(dict[str, object], raw_item)
+    path = str(item.get("path", ""))
+    quote = str(item.get("quote", ""))
+    if not path:
+        return None, "path is empty"
+    if not quote:
+        return None, "quote is empty"
+    return (path, quote), ""
 
 
 def _error_reason(prefix: str, error: Exception) -> str:

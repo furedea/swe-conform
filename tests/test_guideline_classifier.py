@@ -1,5 +1,6 @@
 """Tests for repository-wide guideline classification."""
 
+import json
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -136,6 +137,72 @@ def test_checker_downgrades_unverifiable_pass_to_review(
 
     assert result.status is guideline.GuidelineStatus.REVIEW
     assert "verified" in result.reason
+
+
+def test_checker_keeps_verified_evidence_when_another_item_is_unverifiable(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: Path,
+) -> None:
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    document_path = repository_path / "CONTRIBUTING.md"
+    document_path.write_text("Functions must use snake_case.\n", encoding="utf-8")
+    workspace = mocker.Mock(spec=repository_workspace.GitRepositoryWorkspace)
+    workspace.checkout.return_value = nullcontext(tmp_path)
+    model_client = mocker.Mock(spec=guideline_classifier.StructuredModelClient)
+    model_client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value={
+            "status": "pass",
+            "evidence": [
+                {
+                    "path": "CONTRIBUTING.md",
+                    "quote": "Functions must use snake_case.",
+                },
+                {
+                    "path": "missing.md",
+                    "quote": "Tests must use the shared fixture.",
+                },
+            ],
+        },
+        usage=guideline.TokenUsage(),
+    )
+    checker = guideline_classifier.ModelGuidelineChecker(
+        workspace=workspace,
+        model_client=model_client,
+        model="gpt-5.6-luna",
+    )
+
+    result = checker.check(_candidate())
+
+    assert result.status is guideline.GuidelineStatus.PASS
+    assert [evidence.path for evidence in result.evidence] == ["CONTRIBUTING.md"]
+    assert [(issue.index, issue.reason) for issue in result.evidence_issues] == [
+        (2, "path is not a file"),
+    ]
+
+
+def test_checker_retains_the_structured_model_response_for_audit(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repository").mkdir()
+    workspace = mocker.Mock(spec=repository_workspace.GitRepositoryWorkspace)
+    workspace.checkout.return_value = nullcontext(tmp_path)
+    model_client = mocker.Mock(spec=guideline_classifier.StructuredModelClient)
+    model_response = {"status": "not_found", "evidence": []}
+    model_client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value=model_response,
+        usage=guideline.TokenUsage(),
+    )
+    checker = guideline_classifier.ModelGuidelineChecker(
+        workspace=workspace,
+        model_client=model_client,
+        model="gpt-5.6-luna",
+    )
+
+    result = checker.check(_candidate())
+
+    assert json.loads(result.model_response_json) == model_response
 
 
 def test_checker_normalizes_verified_evidence_paths(

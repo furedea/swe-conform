@@ -118,3 +118,55 @@ def test_store_retries_error_results_on_resume(tmp_path: Path) -> None:
     store.write_reports()
     header = (tmp_path / "output" / "selected_repositories.csv").read_text(encoding="utf-8").splitlines()[0]
     assert "name" in header
+
+
+def test_store_saves_the_model_response_with_unverified_evidence_details(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    model_response = {
+        "status": "pass",
+        "evidence": [
+            {
+                "path": "CONTRIBUTING.md",
+                "quote": "Changes must preserve public API compatibility.",
+            },
+            {
+                "path": "missing.md",
+                "quote": "Tests must use the shared fixture.",
+            },
+        ],
+    }
+    result = pipeline.RepositoryResult(
+        candidate=_candidate(),
+        guideline=guideline.GuidelineResult(
+            status=guideline.GuidelineStatus.PASS,
+            reason="Verified evidence with one unverified item.",
+            evidence=(
+                guideline.GuidelineEvidence(
+                    path="CONTRIBUTING.md",
+                    quote="Changes must preserve public API compatibility.",
+                    content=b"Changes must preserve public API compatibility.\n",
+                ),
+            ),
+            evidence_issues=(guideline.GuidelineEvidenceIssue(index=2, reason="path is not a file"),),
+            model_response_json=json.dumps(model_response, ensure_ascii=True, sort_keys=True),
+            model_called=True,
+        ),
+    )
+    store = result_store.ResultStore(output_dir, configuration={"model": "gpt-5.6-luna"})
+    store.initialize()
+
+    store.append(result)
+
+    record = json.loads((output_dir / "results.jsonl").read_text(encoding="utf-8"))
+    response_path = "model-responses/example/project/0123456789abcdef/response.json"
+    assert record["model_response_path"] == response_path
+    assert record["unverified_evidence_count"] == 1
+    assert json.loads((output_dir / response_path).read_text(encoding="utf-8")) == {
+        "model_response": model_response,
+        "unverified_evidence": [
+            {
+                "index": 2,
+                "reason": "path is not a file",
+            },
+        ],
+    }
