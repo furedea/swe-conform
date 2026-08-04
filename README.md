@@ -12,8 +12,8 @@ The filter processes repositories in this order:
 2. Materialize that exact revision from the HDD cache in a disposable SSD
    workspace without Git metadata or network access.
 3. Run Codex CLI in a restricted container to search the complete snapshot for
-   natural-language rules or policies about writing or changing source code or
-   tests.
+   natural-language statements that directly constrain the content, structure,
+   or behavior of source code or test code.
 4. Verify every `pass` quote at its reported path and preserve every verified
    guideline file as an output artifact.
 

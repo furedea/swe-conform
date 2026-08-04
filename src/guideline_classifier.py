@@ -20,9 +20,13 @@ _MAX_INPUT_CHARACTERS = 120_000
 _MAX_ERROR_CHARACTERS = 500
 _SYSTEM_INSTRUCTIONS = """Inspect the entire repository under repository/ in read-only mode.
 
-Determine whether repository/ contains at least one file that describes, in
-natural language, rules or policies to follow when writing, modifying, or
-organizing this repository's source code or tests.
+Determine whether repository/ contains at least one file with a
+natural-language statement that directly constrains the content, structure, or
+behavior of this repository's source code or test code.
+
+Even when a statement relates to a code change, do not include it if it applies
+to an action performed by a developer or to a pull request rather than to the
+source code or test code itself.
 
 Use the file's title, headings, introduction, and body when making the
 determination. Do not judge an individual statement in isolation. Consider what

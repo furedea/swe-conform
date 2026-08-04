@@ -76,9 +76,14 @@ def test_checker_explores_the_repository_with_the_candidate_guideline_contract(
     normalized_instructions = " ".join(instructions.split())
     assert "Inspect the entire repository under repository/ in read-only mode" in normalized_instructions
     assert (
-        "rules or policies to follow when writing, modifying, or organizing this repository's "
-        "source code or tests" in normalized_instructions
+        "natural-language statement that directly constrains the content, structure, or behavior "
+        "of this repository's source code or test code" in normalized_instructions
     )
+    assert (
+        "an action performed by a developer or to a pull request rather than to the source code "
+        "or test code itself" in normalized_instructions
+    )
+    assert "rules or policies to follow when writing, modifying, or organizing" not in normalized_instructions
     assert "Do not judge an individual statement in isolation" in normalized_instructions
     assert "Do not restrict the search in advance by file name or location" in normalized_instructions
     assert "Do not stop after finding the first qualifying file" in normalized_instructions

@@ -2,12 +2,12 @@
 
 ## Scope
 
-The automated filter selects repositories that contain natural-language rules
-or policies about writing, modifying, or organizing source code or tests. It
-intentionally screens broadly for subsequent human review. Human reviewers
-decide whether the guidance is specific to the project. All repository evidence
-is evaluated at the candidate CSV's `lastCommitSHA` rather than the moving
-default branch.
+The automated filter selects repositories that contain natural-language
+statements that directly constrain the content, structure, or behavior of
+source code or test code. Statements governing developer actions or pull
+requests do not qualify. Human reviewers decide whether qualifying guidance is
+specific to the project. All repository evidence is evaluated at the candidate
+CSV's `lastCommitSHA` rather than the moving default branch.
 
 ## Stage 1: Guideline candidate screening
 
@@ -54,8 +54,8 @@ evidence and prohibits file changes and network access.
 
 The request uses strict JSON Schema with two outcomes:
 
-- `pass`: the repository contains at least one file with natural-language rules
-  or policies about writing, modifying, or organizing its source code or tests
+- `pass`: the repository contains at least one file with a natural-language
+  statement that directly constrains its source code or test code
 - `not_found`: no qualifying file can be verified after repository-wide
   exploration
 
