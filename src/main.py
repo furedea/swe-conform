@@ -16,6 +16,7 @@ import codex_cli_client
 import github_client
 import guideline_classifier
 import markdown_audit
+import markdown_filename_audit
 import pipeline
 import repository
 import repository_cache
@@ -49,6 +50,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments.command == "audit-markdown":
         _audit_markdown(arguments)
+        return
+    if arguments.command == "audit-markdown-filenames":
+        _audit_markdown_filenames(arguments)
         return
     parser.print_help()
 
@@ -106,18 +110,28 @@ def _parser() -> argparse.ArgumentParser:
         "audit-markdown",
         help="List Markdown files containing configured terms and compare agent evidence",
     )
-    audit_parser.add_argument("--input-dir", type=Path, required=True)
-    audit_parser.add_argument("--output-dir", type=Path, required=True)
-    audit_parser.add_argument("--evidence-csv", type=Path, action="append", required=True)
-    audit_parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
-    audit_parser.add_argument("--limit", type=_positive_integer)
-    audit_parser.add_argument(
+    _add_markdown_audit_arguments(audit_parser)
+
+    filename_audit_parser = subparsers.add_parser(
+        "audit-markdown-filenames",
+        help="List Markdown files containing configured filename terms and compare agent evidence",
+    )
+    _add_markdown_audit_arguments(filename_audit_parser)
+    return parser
+
+
+def _add_markdown_audit_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--evidence-csv", type=Path, action="append", required=True)
+    parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
+    parser.add_argument("--limit", type=_positive_integer)
+    parser.add_argument(
         "--allow-out-of-window-snapshots",
         action="store_false",
         dest="enforce_snapshot_window",
         help="Allow revision-pinned replay inputs outside the collection window",
     )
-    return parser
 
 
 def _positive_integer(raw_value: str) -> int:
@@ -261,6 +275,36 @@ def _audit_markdown(arguments: argparse.Namespace) -> None:
     finally:
         client.close()
     markdown_audit.write_reports(report, arguments.output_dir)
+    payload = {
+        "requested": report.stats.requested,
+        "completed": report.stats.completed,
+        "errors": report.stats.errors,
+        "elapsed_seconds": round(report.stats.elapsed_seconds, 3),
+        "output_dir": str(arguments.output_dir),
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
+    candidates = repository.load_repository_candidates(
+        arguments.input_dir,
+        enforce_snapshot_window=arguments.enforce_snapshot_window,
+    )
+    agent_evidence = markdown_audit.load_agent_evidence(arguments.evidence_csv)
+    client = github_client.GitHubClient(token=github_credential())
+    try:
+        auditor = markdown_filename_audit.MarkdownFilenameAuditor(
+            client=client,
+            agent_evidence=agent_evidence,
+        )
+        runner = markdown_filename_audit.MarkdownFilenameAuditRunner(
+            auditor=auditor,
+            workers=arguments.workers,
+        )
+        report = runner.run(candidates, limit=arguments.limit)
+    finally:
+        client.close()
+    markdown_filename_audit.write_reports(report, arguments.output_dir)
     payload = {
         "requested": report.stats.requested,
         "completed": report.stats.completed,
