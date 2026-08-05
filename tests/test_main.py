@@ -52,7 +52,7 @@ def test_markdown_audit_accepts_repeatable_agent_evidence_reports() -> None:
         Path("retry/guideline_files.csv"),
     ]
     assert arguments.workers == 4
-    assert arguments.checkout_timeout_seconds == 900
+    assert not hasattr(arguments, "checkout_timeout_seconds")
 
 
 def test_markdown_audit_writes_the_repository_term_coverage_reports(
@@ -61,8 +61,9 @@ def test_markdown_audit_writes_the_repository_term_coverage_reports(
     tmp_path: Path,
 ) -> None:
     load_candidates = mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=())
-    workspace = mocker.patch("main._repository_workspace", autospec=True)
     load_evidence = mocker.patch("main.markdown_audit.load_agent_evidence", autospec=True, return_value={})
+    credential = mocker.patch("main.github_credential", autospec=True, return_value="github-credential")
+    client = mocker.patch("main.github_client.GitHubClient", autospec=True)
     auditor = mocker.patch("main.markdown_audit.MarkdownAuditor", autospec=True)
     runner = mocker.patch("main.markdown_audit.MarkdownAuditRunner", autospec=True)
     report = markdown_audit.MarkdownAuditReport(
@@ -93,9 +94,12 @@ def test_markdown_audit_writes_the_repository_term_coverage_reports(
 
     load_candidates.assert_called_once_with(Path("experiments/input"), enforce_snapshot_window=False)
     load_evidence.assert_called_once_with([Path("experiment/guideline_files.csv")])
-    auditor.assert_called_once_with(workspace=workspace.return_value, agent_evidence={})
+    credential.assert_called_once_with()
+    client.assert_called_once_with(token="github-credential")
+    auditor.assert_called_once_with(client=client.return_value, agent_evidence={})
     runner.assert_called_once_with(auditor=auditor.return_value, workers=4)
     runner.return_value.run.assert_called_once_with((), limit=None)
+    client.return_value.close.assert_called_once_with()
     write_reports.assert_called_once_with(report, output_dir)
     assert json.loads(capsys.readouterr().out) == {
         "completed": 0,

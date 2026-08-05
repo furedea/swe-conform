@@ -13,6 +13,7 @@ from pathlib import Path
 import batch_runner
 import cache_runner
 import codex_cli_client
+import github_client
 import guideline_classifier
 import markdown_audit
 import pipeline
@@ -110,10 +111,6 @@ def _parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--evidence-csv", type=Path, action="append", required=True)
     audit_parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
     audit_parser.add_argument("--limit", type=_positive_integer)
-    audit_parser.add_argument("--git-command", default="git")
-    audit_parser.add_argument("--cache-root", type=Path)
-    audit_parser.add_argument("--workspace-root", type=Path)
-    audit_parser.add_argument("--checkout-timeout-seconds", type=_positive_integer, default=900)
     audit_parser.add_argument(
         "--allow-out-of-window-snapshots",
         action="store_false",
@@ -252,14 +249,17 @@ def _audit_markdown(arguments: argparse.Namespace) -> None:
         arguments.input_dir,
         enforce_snapshot_window=arguments.enforce_snapshot_window,
     )
-    workspace = _repository_workspace(arguments)
     agent_evidence = markdown_audit.load_agent_evidence(arguments.evidence_csv)
-    auditor = markdown_audit.MarkdownAuditor(
-        workspace=workspace,
-        agent_evidence=agent_evidence,
-    )
-    runner = markdown_audit.MarkdownAuditRunner(auditor=auditor, workers=arguments.workers)
-    report = runner.run(candidates, limit=arguments.limit)
+    client = github_client.GitHubClient(token=github_credential())
+    try:
+        auditor = markdown_audit.MarkdownAuditor(
+            client=client,
+            agent_evidence=agent_evidence,
+        )
+        runner = markdown_audit.MarkdownAuditRunner(auditor=auditor, workers=arguments.workers)
+        report = runner.run(candidates, limit=arguments.limit)
+    finally:
+        client.close()
     markdown_audit.write_reports(report, arguments.output_dir)
     payload = {
         "requested": report.stats.requested,

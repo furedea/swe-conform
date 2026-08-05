@@ -6,15 +6,14 @@ import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.parse import quote
 
+import github_client
 import repository
-import repository_workspace
 
 KEYWORDS = (
     "style",
@@ -64,11 +63,15 @@ class MarkdownAuditStatus(StrEnum):
     SCAN_ERROR = "scan_error"
 
 
-class RepositoryWorkspace(Protocol):
-    """Materialize one repository revision for Markdown inspection."""
+class MarkdownRepositoryClient(Protocol):
+    """Retrieve Markdown documents from one revision-pinned GitHub tree."""
 
-    def checkout(self, repository: str, revision: str) -> AbstractContextManager[Path]:
-        """Yield a source-only repository workspace."""
+    def get_complete_tree(self, repository: str, revision: str) -> github_client.RepositoryTree:
+        """Return every blob entry reachable from a repository revision."""
+        ...
+
+    def get_text_file(self, repository: str, revision: str, path: str) -> str:
+        """Return one text file at a repository revision."""
         ...
 
 
@@ -122,24 +125,23 @@ class MarkdownAuditReport:
 class MarkdownAuditor:
     """Scan revision-pinned repositories without invoking a model."""
 
-    __slots__ = ("_agent_evidence", "_workspace")
+    __slots__ = ("_agent_evidence", "_client")
 
     def __init__(
         self,
         *,
-        workspace: RepositoryWorkspace,
+        client: MarkdownRepositoryClient,
         agent_evidence: Mapping[tuple[str, str], tuple[str, ...]],
     ) -> None:
-        self._workspace = workspace
+        self._client = client
         self._agent_evidence = agent_evidence
 
     def audit(self, candidate: repository.RepositoryCandidate) -> RepositoryMarkdownAudit:
         """Return keyword matches and evidence coverage for one revision."""
         identity = (candidate.repository, candidate.revision)
         try:
-            with self._workspace.checkout(*identity) as workspace_path:
-                keyword_files = scan_markdown_files(workspace_path / "repository")
-        except repository_workspace.RepositoryCheckoutError as error:
+            keyword_files = scan_github_markdown_files(self._client, *identity)
+        except github_client.GitHubRetrievalError as error:
             return RepositoryMarkdownAudit(
                 candidate=candidate,
                 status=MarkdownAuditStatus.RETRIEVAL_ERROR,
@@ -209,9 +211,7 @@ def scan_markdown_files(repository_path: Path) -> tuple[MarkdownKeywordFile, ...
         if path.suffix.lower() != ".md" or path.is_symlink() or not path.is_file():
             continue
         content = path.read_text(encoding="utf-8", errors="replace")
-        matched_keywords = tuple(
-            keyword for keyword, pattern in _KEYWORD_PATTERNS.items() if pattern.search(content) is not None
-        )
+        matched_keywords = _matched_keywords(content)
         if matched_keywords:
             matches.append(
                 MarkdownKeywordFile(
@@ -220,6 +220,29 @@ def scan_markdown_files(repository_path: Path) -> tuple[MarkdownKeywordFile, ...
                 ),
             )
     return tuple(matches)
+
+
+def scan_github_markdown_files(
+    client: MarkdownRepositoryClient,
+    repository: str,
+    revision: str,
+) -> tuple[MarkdownKeywordFile, ...]:
+    """Return matching Markdown files fetched from a complete GitHub tree."""
+    tree = client.get_complete_tree(repository, revision)
+    matches: list[MarkdownKeywordFile] = []
+    entries = sorted(tree.entries, key=lambda entry: entry.path)
+    for entry in entries:
+        if entry.mode == "120000" or PurePosixPath(entry.path).suffix.casefold() != ".md":
+            continue
+        content = client.get_text_file(repository, revision, entry.path)
+        matched_keywords = _matched_keywords(content)
+        if matched_keywords:
+            matches.append(MarkdownKeywordFile(path=entry.path, matched_keywords=matched_keywords))
+    return tuple(matches)
+
+
+def _matched_keywords(content: str) -> tuple[str, ...]:
+    return tuple(keyword for keyword, pattern in _KEYWORD_PATTERNS.items() if pattern.search(content) is not None)
 
 
 def compare_agent_evidence(

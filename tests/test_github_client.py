@@ -47,3 +47,91 @@ def test_client_reads_recursive_tree_and_decodes_blob() -> None:
     assert tree_call.args[0].endswith("/repos/example/project/git/trees/0123456789abcdef")
     assert tree_call.kwargs["params"] == {"recursive": "1"}
     assert tree_call.kwargs["headers"]["Authorization"] == "Bearer test-credential"
+
+
+def test_client_recovers_a_complete_tree_from_truncated_recursive_subtrees() -> None:
+    root_recursive = MagicMock(spec=httpx.Response)
+    root_recursive.json.return_value = {"tree": [], "truncated": True}
+    root_shallow = MagicMock(spec=httpx.Response)
+    root_shallow.json.return_value = {
+        "tree": [
+            {"path": "ROOT.md", "sha": "blob-root", "size": 10, "type": "blob"},
+            {"path": "docs", "sha": "tree-docs", "type": "tree"},
+            {"path": "src", "sha": "tree-src", "type": "tree"},
+        ],
+        "truncated": False,
+    }
+    docs_recursive = MagicMock(spec=httpx.Response)
+    docs_recursive.json.return_value = {
+        "tree": [
+            {"path": "guide.md", "sha": "blob-guide", "size": 20, "type": "blob"},
+            {"path": "nested/rules.md", "sha": "blob-rules", "size": 30, "type": "blob"},
+        ],
+        "truncated": False,
+    }
+    src_recursive = MagicMock(spec=httpx.Response)
+    src_recursive.json.return_value = {
+        "tree": [
+            {"path": "main.py", "sha": "blob-main", "size": 40, "type": "blob"},
+        ],
+        "truncated": False,
+    }
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (
+        root_recursive,
+        root_shallow,
+        docs_recursive,
+        src_recursive,
+    )
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    tree = client.get_complete_tree("example/project", "0123456789abcdef")
+
+    assert [entry.path for entry in tree.entries] == [
+        "ROOT.md",
+        "docs/guide.md",
+        "docs/nested/rules.md",
+        "src/main.py",
+    ]
+    assert tree.truncated is False
+
+
+def test_client_reads_one_text_file_from_the_pinned_raw_url() -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.content = b"Use snake_case.\n"
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.return_value = response
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "docs/Coding Guide.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    request = http_client.get.call_args
+    assert request.args == (
+        "https://raw.githubusercontent.com/example/project/0123456789abcdef/docs/Coding%20Guide.md",
+    )
+
+
+def test_client_retries_a_transient_network_failure(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.content = b"Use snake_case.\n"
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (httpx.ReadTimeout("timed out"), response)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "CONTRIBUTING.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    assert http_client.get.call_count == 2
+    sleep.assert_called_once_with(1.0)

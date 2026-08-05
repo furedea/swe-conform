@@ -2,14 +2,13 @@
 
 import csv
 import threading
-from contextlib import nullcontext
 from pathlib import Path
 
 from pytest_mock import MockerFixture
 
+import github_client
 import markdown_audit
 import repository
-import repository_workspace
 
 
 def _candidate() -> repository.RepositoryCandidate:
@@ -154,37 +153,52 @@ def test_load_agent_evidence_merges_and_deduplicates_csv_files(tmp_path: Path) -
     }
 
 
-def test_auditor_scans_the_pinned_repository_and_compares_agent_evidence(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    repository_path = tmp_path / "repository"
-    repository_path.mkdir()
-    (repository_path / "CONTRIBUTING.md").write_text("Follow the code style.\n", encoding="utf-8")
-    workspace = mocker.Mock(spec=repository_workspace.GitRepositoryWorkspace)
-    workspace.checkout.return_value = nullcontext(tmp_path)
+def test_auditor_fetches_only_md_files_from_the_pinned_github_tree(mocker: MockerFixture) -> None:
+    client = mocker.Mock()
+    client.get_complete_tree.return_value = github_client.RepositoryTree(
+        entries=(
+            github_client.TreeEntry(path="CONTRIBUTING.md", sha="blob-contributing", size=100),
+            github_client.TreeEntry(path="docs/README.MD", sha="blob-readme", size=100),
+            github_client.TreeEntry(
+                path="docs/linked.md",
+                sha="blob-link",
+                size=20,
+                mode="120000",
+            ),
+            github_client.TreeEntry(path="docs/guide.mdx", sha="blob-mdx", size=100),
+            github_client.TreeEntry(path="src/main.py", sha="blob-python", size=100),
+        ),
+        truncated=False,
+    )
+    client.get_text_file.side_effect = (
+        "Follow the code style.\n",
+        "Project rules.\n",
+    )
     auditor = markdown_audit.MarkdownAuditor(
-        workspace=workspace,
-        agent_evidence={
-            ("example/project", "0123456789abcdef"): ("CONTRIBUTING.md",),
-        },
+        client=client,
+        agent_evidence={},
     )
 
     result = auditor.audit(_candidate())
 
-    workspace.checkout.assert_called_once_with("example/project", "0123456789abcdef")
-    assert result.status is markdown_audit.MarkdownAuditStatus.COMPLETED
-    assert [match.path for match in result.keyword_files] == ["CONTRIBUTING.md"]
-    assert result.agent_evidence[0].keyword_match is True
+    client.get_complete_tree.assert_called_once_with("example/project", "0123456789abcdef")
+    assert [call.args for call in client.get_text_file.call_args_list] == [
+        ("example/project", "0123456789abcdef", "CONTRIBUTING.md"),
+        ("example/project", "0123456789abcdef", "docs/README.MD"),
+    ]
+    assert [match.path for match in result.keyword_files] == [
+        "CONTRIBUTING.md",
+        "docs/README.MD",
+    ]
 
 
-def test_auditor_preserves_unevaluated_agent_evidence_after_checkout_failure(
+def test_auditor_preserves_unevaluated_agent_evidence_after_github_retrieval_failure(
     mocker: MockerFixture,
 ) -> None:
-    workspace = mocker.Mock(spec=repository_workspace.GitRepositoryWorkspace)
-    workspace.checkout.side_effect = repository_workspace.RepositoryCheckoutError("unavailable")
+    client = mocker.Mock()
+    client.get_complete_tree.side_effect = github_client.GitHubRetrievalError("unavailable")
     auditor = markdown_audit.MarkdownAuditor(
-        workspace=workspace,
+        client=client,
         agent_evidence={
             ("example/project", "0123456789abcdef"): ("CONTRIBUTING.md",),
         },
