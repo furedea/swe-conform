@@ -106,11 +106,12 @@ default and can be changed with `--model-timeout-seconds`. HDD acquisition has
 a one-hour per-repository timeout and can be changed with
 `--fetch-timeout-seconds`.
 
-The default candidate set contains 4,359 repositories whose latest recorded
-commit is between 2026-01-01 and 2026-07-31. The candidate `lastCommitSHA` is
-the reproducible snapshot identifier. Input rows outside
-`[2026-01-01T00:00:00Z, 2026-08-01T00:00:00Z)` are rejected. Acquisition does
-not query the current moving default branch.
+The default candidate set contains 4,935 repositories whose latest recorded
+commit is on or after 2026-01-01. The source CSV files were collected on
+2026-08-07 at approximately 15:00 JST. The candidate `lastCommitSHA` is the
+reproducible snapshot identifier. Input rows before `2026-01-01T00:00:00Z` are
+rejected. There is no upper bound on `lastCommit`. Acquisition does not query
+the current moving default branch.
 
 Use `--allow-out-of-window-snapshots` only to replay a revision-pinned
 experiment whose recorded inputs predate the current collection window. The

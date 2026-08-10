@@ -12,7 +12,29 @@ _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REVISION_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _REQUIRED_COLUMNS = frozenset({"name", "lastCommitSHA", "lastCommit", "defaultBranch", "license"})
 SNAPSHOT_START = datetime(2026, 1, 1, tzinfo=UTC)
-SNAPSHOT_CUTOFF = datetime(2026, 8, 1, tzinfo=UTC)
+SELECTION_LANGUAGES = ("Java", "JavaScript", "Python", "TypeScript")
+SELECTION_MINIMUMS: Mapping[str, int] = MappingProxyType(
+    {
+        "stargazers": 1000,
+        "totalIssues": 200,
+        "totalPullRequests": 200,
+        "forks": 200,
+        "contributors": 10,
+    },
+)
+
+
+class SelectionCriteriaError(ValueError):
+    """One or more repository candidates violate the collection criteria."""
+
+    __slots__ = ("violations",)
+
+    def __init__(self, violations: Sequence[str]) -> None:
+        self.violations = tuple(violations)
+        details = "\n".join(f"- {violation}" for violation in self.violations)
+        super().__init__(
+            f"Repository candidate selection validation failed ({len(self.violations)} violation(s)):\n{details}",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +47,56 @@ class RepositoryCandidate:
     source_file: str
     input_index: int
     fields: Mapping[str, str]
+
+
+def validate_selection_criteria(candidates: Sequence[RepositoryCandidate]) -> None:
+    """Reject candidates that violate the quantitative collection criteria."""
+    violations: list[str] = []
+    language_counts: dict[str, int] = dict.fromkeys(SELECTION_LANGUAGES, 0)
+    repository_counts: dict[str, int] = {}
+    for candidate in candidates:
+        repository_key = candidate.repository.casefold()
+        repository_counts[repository_key] = repository_counts.get(repository_key, 0) + 1
+        language = candidate.fields.get("mainLanguage", "").strip()
+        if language in language_counts:
+            language_counts[language] += 1
+        else:
+            violations.append(
+                f"{candidate.repository}: mainLanguage must be one of "
+                f"{', '.join(SELECTION_LANGUAGES)}; got {language!r}",
+            )
+        for field, minimum in SELECTION_MINIMUMS.items():
+            value = _selection_integer(candidate, field, violations)
+            if value is not None and value < minimum:
+                violations.append(
+                    f"{candidate.repository}: {field} must be at least {minimum}; got {value}",
+                )
+        is_fork = candidate.fields.get("isFork", "").strip().casefold()
+        if is_fork != "false":
+            violations.append(
+                f"{candidate.repository}: isFork must be false; got {candidate.fields.get('isFork', '')!r}",
+            )
+    missing_languages = [language for language, count in language_counts.items() if count == 0]
+    if missing_languages:
+        violations.append(f"missing language strata: {', '.join(missing_languages)}")
+    violations.extend(
+        f"duplicate repository: {name}" for name, count in sorted(repository_counts.items()) if count > 1
+    )
+    if violations:
+        raise SelectionCriteriaError(violations)
+
+
+def selection_criteria_report() -> dict[str, object]:
+    """Return the machine-readable collection criteria."""
+    return {
+        "stargazers_minimum": SELECTION_MINIMUMS["stargazers"],
+        "total_issues_minimum": SELECTION_MINIMUMS["totalIssues"],
+        "total_pull_requests_minimum": SELECTION_MINIMUMS["totalPullRequests"],
+        "forks_minimum": SELECTION_MINIMUMS["forks"],
+        "contributors_minimum": SELECTION_MINIMUMS["contributors"],
+        "is_fork": False,
+        "languages": list(SELECTION_LANGUAGES),
+    }
 
 
 def load_repository_candidates(
@@ -74,6 +146,19 @@ def _validate_columns(input_path: Path, fieldnames: Sequence[str] | None) -> Non
         missing = ", ".join(sorted(missing_columns))
         msg = f"{input_path} is missing required columns: {missing}"
         raise ValueError(msg)
+
+
+def _selection_integer(
+    candidate: RepositoryCandidate,
+    field: str,
+    violations: list[str],
+) -> int | None:
+    raw_value = candidate.fields.get(field, "").strip()
+    try:
+        return int(raw_value)
+    except ValueError:
+        violations.append(f"{candidate.repository}: {field} must be an integer; got {raw_value!r}")
+        return None
 
 
 def _candidate_from_row(
@@ -126,7 +211,3 @@ def _validate_snapshot_committed_at(
     if committed_at < SNAPSHOT_START:
         msg = f"Repository commit is before the 2026-01-01 UTC snapshot start: {repository}: {raw_value}"
         raise ValueError(msg)
-    if committed_at < SNAPSHOT_CUTOFF:
-        return
-    msg = f"Repository commit is outside the 2026-07-31 UTC snapshot cutoff: {repository}: {raw_value}"
-    raise ValueError(msg)

@@ -15,8 +15,8 @@ The acquisition stage fetches the candidate CSV's exact `lastCommitSHA` into a
 persistent bare repository cache. It uses neither shallow history nor partial
 clone filters, so the cache contains the commit ancestry, trees, and ordinary
 blobs reachable from the snapshot revision. It does not fetch descendants of
-that revision. Input timestamps outside
-`[2026-01-01T00:00:00Z, 2026-08-01T00:00:00Z)` are rejected.
+that revision. Input `lastCommit` timestamps before `2026-01-01T00:00:00Z` are
+rejected. No upper timestamp bound is enforced.
 
 The classification stage makes a shared local clone from the HDD cache into a
 disposable SSD workspace, checks out the exact revision, and removes its Git
