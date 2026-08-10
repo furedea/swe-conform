@@ -5,7 +5,6 @@ import html
 import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import astuple
 from pathlib import Path
 from typing import cast
 from urllib.parse import quote
@@ -126,7 +125,9 @@ def _record_from_result(
     model_response_path: str,
 ) -> dict[str, object]:
     candidate = result.candidate
-    input_units, output_units, total_units = astuple(result.guideline.usage)
+    input_units = result.guideline.usage.input_tokens
+    output_units = result.guideline.usage.output_tokens
+    total_units = result.guideline.usage.total_tokens
     first_evidence = evidence_records[0] if evidence_records else {}
     return {
         "source_file": candidate.source_file,

@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "label": {
+      "type": "string",
+      "enum": [
+        "YES",
+        "NO"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "description": "Brief explanation based on the document."
+    },
+    "quote": {
+      "type": "string",
+      "description": "For YES, a short, self-contained, exact, contiguous substring copied from the input document that directly states the condition used to classify the document as YES. For NO, an empty string."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "description": "Confidence score (1-10)."
+    }
+  },
+  "required": [
+    "label",
+    "reason",
+    "quote",
+    "confidence"
+  ],
+  "additionalProperties": false
+}
