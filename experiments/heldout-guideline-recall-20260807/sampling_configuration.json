@@ -1,0 +1,36 @@
+{
+  "eligible_population": 4935,
+  "exclude_csv_sha256": {},
+  "excluded_repository_count": 0,
+  "input_sha256": {
+    "java.csv": "17a12ff2cab990995b6fb322156c3cec2a4ad8be46962d428a1d949cf9b09345",
+    "js.csv": "5d1d125acd2412c94e308265aefbf6e3661382677d7979f6997a36ea9440a860",
+    "python.csv": "8465e537b8d1ec3da18d924d958de0d358251e0469a40e088aeba6615dcadd17",
+    "ts.csv": "23ecf45878fbc0635bf4b20cfbdfb0b151c258ec9391492eb372ee86df9fc91a"
+  },
+  "language_populations": {
+    "Java": 658,
+    "JavaScript": 829,
+    "Python": 1841,
+    "TypeScript": 1607
+  },
+  "language_sample_sizes": {
+    "Java": 13,
+    "JavaScript": 13,
+    "Python": 12,
+    "TypeScript": 12
+  },
+  "languages": [
+    "Java",
+    "JavaScript",
+    "Python",
+    "TypeScript"
+  ],
+  "population": 4935,
+  "requested_exclusion_count": 0,
+  "sample_seed": 20260807,
+  "sample_size": 50,
+  "sampling_method": "stratified_random_without_replacement",
+  "sampling_unit": "repository",
+  "schema_version": 1
+}

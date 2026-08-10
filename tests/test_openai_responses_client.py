@@ -44,7 +44,7 @@ def test_client_posts_strict_json_schema_to_responses_api() -> None:
     assert call.kwargs["json"]["store"] is False
     assert call.kwargs["json"]["text"]["format"]["strict"] is True
     assert result.value == {"status": "pass"}
-    assert astuple(result.usage) == (100, 20, 120)
+    assert astuple(result.usage) == (100, 20, 120, 0, 0)
 
 
 def test_client_reports_provider_error_body() -> None:
@@ -79,3 +79,31 @@ def test_client_reports_provider_error_body() -> None:
         return
     msg = "RuntimeError should include the provider error body"
     raise AssertionError(msg)
+
+
+def test_parse_json_response_reports_cache_read_and_write_tokens() -> None:
+    document = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"status":"pass"}'}],
+            },
+        ],
+        "usage": {
+            "input_tokens": 4_000,
+            "input_tokens_details": {
+                "cached_tokens": 1_920,
+                "cache_write_tokens": 1_024,
+            },
+            "output_tokens": 300,
+            "total_tokens": 4_300,
+            "cost": 0.00042,
+        },
+    }
+
+    result = openai_responses_client.parse_json_response(document)
+
+    assert result.usage.cached_input_tokens == 1_920
+    assert result.usage.cache_write_input_tokens == 1_024
+    assert result.cost_usd == 0.00042
+    assert result.document is document

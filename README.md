@@ -12,8 +12,8 @@ The filter processes repositories in this order:
 2. Materialize that exact revision from the HDD cache in a disposable SSD
    workspace without Git metadata or network access.
 3. Run Codex CLI in a restricted container to search the complete snapshot for
-   natural-language rules or policies about writing or changing source code or
-   tests.
+   natural-language statements that directly constrain the content, structure,
+   or behavior of source code or test code.
 4. Verify every `pass` quote at its reported path and preserve every verified
    guideline file as an output artifact.
 
@@ -101,14 +101,21 @@ effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit
 experimental configuration. Each worker evaluates one repository with an
 independent Git checkout and Codex CLI process. Repository checkout has a
 15-minute timeout by default and can be changed with
-`--checkout-timeout-seconds`. HDD acquisition has a one-hour per-repository
-timeout and can be changed with `--fetch-timeout-seconds`.
+`--checkout-timeout-seconds`. Model evaluation has a 30-minute timeout by
+default and can be changed with `--model-timeout-seconds`. HDD acquisition has
+a one-hour per-repository timeout and can be changed with
+`--fetch-timeout-seconds`.
 
-The default candidate set contains 4,359 repositories whose latest recorded
-commit is between 2026-01-01 and 2026-07-31. The candidate `lastCommitSHA` is
-the reproducible snapshot identifier. Input rows outside
-`[2026-01-01T00:00:00Z, 2026-08-01T00:00:00Z)` are rejected. Acquisition does
-not query the current moving default branch.
+The default candidate set contains 4,935 repositories whose latest recorded
+commit is on or after 2026-01-01. The source CSV files were collected on
+2026-08-07 at approximately 15:00 JST. The candidate `lastCommitSHA` is the
+reproducible snapshot identifier. Input rows before `2026-01-01T00:00:00Z` are
+rejected. There is no upper bound on `lastCommit`. Acquisition does not query
+the current moving default branch.
+
+Use `--allow-out-of-window-snapshots` only to replay a revision-pinned
+experiment whose recorded inputs predate the current collection window. The
+run configuration records whether the window was enforced.
 
 ## Resume and outputs
 

@@ -1,0 +1,27 @@
+{
+  "cache_root": null,
+  "checkout_timeout_seconds": 900,
+  "classification_contract_sha256": "27ae43ee00a7bb4be31b1ba33729a47479d6a8069760645c240796e17ed804cf",
+  "codex_command": "codex",
+  "codex_image": null,
+  "codex_image_id": null,
+  "codex_runtime": "host",
+  "docker_command": null,
+  "enforce_snapshot_window": true,
+  "filter_order": [
+    "project_guideline"
+  ],
+  "git_command": "git",
+  "input_sha256": {
+    "candidates.csv": "bfba5f93c883756e6fb641ea990be43dcb1c8e8138335d9766daefd54156d1d7"
+  },
+  "last_commit_minimum": "2026-01-01T00:00:00+00:00",
+  "model": "gpt-5.6-luna",
+  "model_timeout_seconds": 3600,
+  "provider": "codex-cli",
+  "reasoning_effort": "max",
+  "repository_source": "github",
+  "schema_version": 2,
+  "workers": 8,
+  "workspace_root": null
+}

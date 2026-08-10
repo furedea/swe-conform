@@ -1,0 +1,20 @@
+{
+  "guideline_status": {
+    "model_error": 2,
+    "not_found": 4,
+    "pass": 32,
+    "review": 12
+  },
+  "model_calls": 50,
+  "processed": 50,
+  "selected": 32,
+  "timing": {
+    "checkout_seconds": 187.658,
+    "model_seconds": 56455.017
+  },
+  "usage": {
+    "input_tokens": 290075690,
+    "output_tokens": 2215751,
+    "total_tokens": 292291441
+  }
+}

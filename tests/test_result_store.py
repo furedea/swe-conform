@@ -118,3 +118,145 @@ def test_store_retries_error_results_on_resume(tmp_path: Path) -> None:
     store.write_reports()
     header = (tmp_path / "output" / "selected_repositories.csv").read_text(encoding="utf-8").splitlines()[0]
     assert "name" in header
+
+
+def test_store_saves_the_model_response_with_unverified_evidence_details(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    model_response = {
+        "status": "pass",
+        "evidence": [
+            {
+                "path": "CONTRIBUTING.md",
+                "quote": "Changes must preserve public API compatibility.",
+            },
+            {
+                "path": "missing.md",
+                "quote": "Tests must use the shared fixture.",
+            },
+        ],
+    }
+    result = pipeline.RepositoryResult(
+        candidate=_candidate(),
+        guideline=guideline.GuidelineResult(
+            status=guideline.GuidelineStatus.PASS,
+            reason="Verified evidence with one unverified item.",
+            evidence=(
+                guideline.GuidelineEvidence(
+                    path="CONTRIBUTING.md",
+                    quote="Changes must preserve public API compatibility.",
+                    content=b"Changes must preserve public API compatibility.\n",
+                ),
+            ),
+            evidence_issues=(
+                guideline.GuidelineEvidenceIssue(
+                    index=2,
+                    path="missing.md",
+                    quote="Tests must use the shared fixture.",
+                    reason="path is not a file",
+                ),
+            ),
+            model_response_json=json.dumps(model_response, ensure_ascii=True, sort_keys=True),
+            model_called=True,
+        ),
+    )
+    store = result_store.ResultStore(output_dir, configuration={"model": "gpt-5.6-luna"})
+    store.initialize()
+
+    store.append(result)
+
+    record = json.loads((output_dir / "results.jsonl").read_text(encoding="utf-8"))
+    response_path = "model-responses/example/project/0123456789abcdef/response.json"
+    assert record["model_response_path"] == response_path
+    assert record["unverified_evidence_count"] == 1
+    unverified_evidence = [
+        {
+            "index": 2,
+            "path": "missing.md",
+            "quote": "Tests must use the shared fixture.",
+            "reason": "path is not a file",
+        },
+    ]
+    assert json.loads(record["unverified_evidence_json"]) == unverified_evidence
+    assert json.loads((output_dir / response_path).read_text(encoding="utf-8")) == {
+        "model_response": model_response,
+        "unverified_evidence": unverified_evidence,
+    }
+
+
+def test_store_preserves_evidence_details_for_a_review_result(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    result = pipeline.RepositoryResult(
+        candidate=_candidate(),
+        guideline=guideline.GuidelineResult(
+            status=guideline.GuidelineStatus.REVIEW,
+            reason="Model returned 2 evidence items: 1 verified and 1 unverified",
+            evidence=(
+                guideline.GuidelineEvidence(
+                    path="CONTRIBUTING.md",
+                    quote="Changes must preserve public API compatibility.",
+                    content=b"Changes must preserve public API compatibility.\n",
+                ),
+            ),
+            evidence_issues=(
+                guideline.GuidelineEvidenceIssue(
+                    index=2,
+                    path="missing.md",
+                    quote="Tests must use the shared fixture.",
+                    reason="path is not a file",
+                ),
+            ),
+            model_called=True,
+        ),
+    )
+    store = result_store.ResultStore(output_dir, configuration={"model": "gpt-5.6-luna"})
+    store.initialize()
+
+    store.append(result)
+
+    record = json.loads((output_dir / "results.jsonl").read_text(encoding="utf-8"))
+    assert record["guideline_status"] == "review"
+    assert record["selected"] is False
+    assert record["guideline_file_count"] == 1
+    assert record["manual_review_path"] == "manual-review/example/project/0123456789abcdef/index.md"
+    artifact_path = output_dir / "guideline-files/example/project/0123456789abcdef/CONTRIBUTING.md"
+    assert artifact_path.read_bytes() == b"Changes must preserve public API compatibility.\n"
+    review_text = (output_dir / record["manual_review_path"]).read_text(encoding="utf-8")
+    assert "- Verified files: 1" in review_text
+    assert "- Unverified evidence: 1" in review_text
+    assert "## Unverified evidence 2: missing.md" in review_text
+    assert "- Verification failure: path is not a file" in review_text
+    assert "> Tests must use the shared fixture." in review_text
+
+
+def test_store_creates_manual_review_for_only_unverified_evidence(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    result = pipeline.RepositoryResult(
+        candidate=_candidate(),
+        guideline=guideline.GuidelineResult(
+            status=guideline.GuidelineStatus.REVIEW,
+            reason="Model pass evidence could not be verified against the repository snapshot",
+            evidence_issues=(
+                guideline.GuidelineEvidenceIssue(
+                    index=1,
+                    path="repository/tests/README.md",
+                    quote="Tests must use the shared fixture.",
+                    reason="path is not a file",
+                ),
+            ),
+            model_called=True,
+        ),
+    )
+    store = result_store.ResultStore(output_dir, configuration={"model": "gpt-5.6-luna"})
+    store.initialize()
+
+    store.append(result)
+    store.write_reports()
+
+    record = json.loads((output_dir / "results.jsonl").read_text(encoding="utf-8"))
+    assert record["manual_review_path"] == "manual-review/example/project/0123456789abcdef/index.md"
+    review_text = (output_dir / record["manual_review_path"]).read_text(encoding="utf-8")
+    assert "- Verified files: 0" in review_text
+    assert "- Unverified evidence: 1" in review_text
+    assert "## Unverified evidence 1: repository/tests/README.md" in review_text
+    review_index = (output_dir / "manual-review/index.md").read_text(encoding="utf-8")
+    assert "example/project/0123456789abcdef/index.md" in review_index

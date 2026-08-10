@@ -24,6 +24,17 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        """Return input tokens billed at the uncached-input rate."""
+        value = self.input_tokens - self.cached_input_tokens - self.cache_write_input_tokens
+        if value < 0:
+            msg = "cached and cache-write input tokens exceed total input tokens"
+            raise ValueError(msg)
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,12 +47,24 @@ class GuidelineEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class GuidelineEvidenceIssue:
+    """One model evidence item that could not be verified."""
+
+    index: int
+    path: str
+    quote: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class GuidelineResult:
     """Evidence-backed classification of a repository guideline."""
 
     status: GuidelineStatus
     reason: str
     evidence: tuple[GuidelineEvidence, ...] = ()
+    evidence_issues: tuple[GuidelineEvidenceIssue, ...] = ()
+    model_response_json: str = ""
     candidate_count: int = 0
     tree_truncated: bool = False
     model_called: bool = False

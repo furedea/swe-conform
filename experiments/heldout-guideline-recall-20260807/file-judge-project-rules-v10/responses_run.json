@@ -1,0 +1,28 @@
+{
+  "attempted": 727,
+  "cache_write_input_tokens": 1273433,
+  "cached_input_tokens": 2985049,
+  "calculated_pilot_cost_usd": 0.680923,
+  "completed": 727,
+  "completed_at": "2026-08-10T18:20:32.538443+00:00",
+  "elapsed_seconds": 647.739124,
+  "errors": 0,
+  "estimated_full_batch_usd": null,
+  "input_tokens": 4260663,
+  "output_tokens": 819459,
+  "pilot_cost_usd": 0.680923,
+  "provider": "openrouter",
+  "provider_reported_cost_usd": 0.680923115,
+  "request_seconds": 8606.03079,
+  "requested": 727,
+  "resumed": 0,
+  "sampled": 727,
+  "started_at": "2026-08-10T18:09:44.396595+00:00",
+  "status_counts": {
+    "not_found": 670,
+    "pass": 56,
+    "review": 1
+  },
+  "uncached_input_tokens": 2181,
+  "workers": 16
+}

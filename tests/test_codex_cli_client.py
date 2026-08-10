@@ -71,7 +71,7 @@ def test_client_runs_luna_max_without_user_harness(
     assert run.call_args.kwargs["input"] == "System instructions:\nsystem\n\nUser request:\ndocuments"
     assert run.call_args.kwargs["cwd"] == working_directory
     assert result.value == {"status": "pass"}
-    assert astuple(result.usage) == (100, 20, 120)
+    assert astuple(result.usage) == (100, 20, 120, 0, 0)
 
 
 def test_docker_client_exposes_only_the_snapshot_outputs_and_temporary_codex_home(
