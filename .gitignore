@@ -4,6 +4,18 @@ result-*
 logs/
 output/
 
+# Reproducible experiment payloads and local archives
+docs/archives/
+experiments/archives/
+experiments/**/archives/
+experiments/**/batch_input.jsonl
+experiments/**/batch_output.jsonl
+experiments/**/responses_checkpoint.jsonl
+experiments/**/guideline-files/
+experiments/**/manual-review/
+experiments/**/model-responses/
+experiments/**/manual-pass-review/*/
+
 .DS_Store
 .env
 .env.*

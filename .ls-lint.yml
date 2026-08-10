@@ -8,8 +8,13 @@ ignore:
   - result
   - result-*
   - docs/logs
+  - docs/archives
+  - experiments/archives
+  - "experiments/**/archives"
   - "experiments/**/guideline-files"
   - "experiments/**/manual-review"
+  - "experiments/**/model-responses"
+  - "experiments/**/manual-pass-review/*"
 
   - README.md
 
