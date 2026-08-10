@@ -1,0 +1,55 @@
+{
+  "confusion_matrix": {
+    "false_negatives": 12,
+    "false_positives": 0,
+    "true_negatives": 658,
+    "true_positives": 56
+  },
+  "decision_matrix": {
+    "not_found": {
+      "missing_prediction": 0,
+      "model_error": 0,
+      "not_found": 658,
+      "pass": 0,
+      "review": 0
+    },
+    "pass": {
+      "missing_prediction": 0,
+      "model_error": 0,
+      "not_found": 12,
+      "pass": 56,
+      "review": 1
+    }
+  },
+  "inputs": {
+    "checklist": "experiments/heldout-guideline-recall-20260807/manual-pass-review/checklist_full.csv",
+    "classified_files": "experiments/heldout-guideline-recall-20260807/file-judge-project-rules-v10/classified_files.csv"
+  },
+  "metrics": {
+    "f1": 0.903226,
+    "false_negative_rate": 0.176471,
+    "false_positive_rate": 0.0,
+    "precision": 1.0,
+    "recall": 0.823529,
+    "resolution_rate": 0.998624,
+    "resolved_accuracy": 0.983471,
+    "specificity": 1.0,
+    "strict_accuracy": 0.982118
+  },
+  "outputs": {
+    "evaluated_files": "experiments/heldout-guideline-recall-20260807/file-judge-project-rules-v10/evaluation/evaluation_files.csv",
+    "false_negatives": "experiments/heldout-guideline-recall-20260807/file-judge-project-rules-v10/evaluation/false_negatives.csv",
+    "false_positives": "experiments/heldout-guideline-recall-20260807/file-judge-project-rules-v10/evaluation/false_positives.csv",
+    "repository_metrics": "experiments/heldout-guideline-recall-20260807/file-judge-project-rules-v10/evaluation/repository_metrics.csv"
+  },
+  "scope": {
+    "checklist_files": 727,
+    "human_labeled_files": 727,
+    "human_unlabeled_files": 0,
+    "matched_predictions": 727,
+    "missing_predictions": 0,
+    "model_errors": 0,
+    "resolved_predictions": 726,
+    "review_decisions": 1
+  }
+}
