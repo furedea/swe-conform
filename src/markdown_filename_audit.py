@@ -1,4 +1,4 @@
-"""Audit Markdown filenames for project-guideline candidate terms."""
+"""Audit Markdown files with sequential filename and content-term filters."""
 
 import csv
 import re
@@ -26,6 +26,22 @@ _FILENAME_TERM_PATTERNS = (
     ("standard", re.compile(r"standards?", flags=re.IGNORECASE)),
     ("convention", re.compile(r"conventions?", flags=re.IGNORECASE)),
     ("rule", re.compile(r"rules?", flags=re.IGNORECASE)),
+    ("develop", re.compile(r"develop", flags=re.IGNORECASE)),
+    ("architecture", re.compile(r"architecture", flags=re.IGNORECASE)),
+    ("design", re.compile(r"design", flags=re.IGNORECASE)),
+    ("coding", re.compile(r"coding", flags=re.IGNORECASE)),
+    ("hacking", re.compile(r"hacking", flags=re.IGNORECASE)),
+)
+_CONTENT_TERM_PATTERNS = (
+    ("style", re.compile(r"\bstyles?\b", flags=re.IGNORECASE)),
+    ("guide", re.compile(r"\bguides?\b", flags=re.IGNORECASE)),
+    ("guideline", re.compile(r"\bguidelines?\b", flags=re.IGNORECASE)),
+    ("standard", re.compile(r"\bstandards?\b", flags=re.IGNORECASE)),
+    ("convention", re.compile(r"\bconventions?\b", flags=re.IGNORECASE)),
+    ("rule", re.compile(r"\brules?\b", flags=re.IGNORECASE)),
+    ("architecture", re.compile(r"\barchitectures?\b", flags=re.IGNORECASE)),
+    ("design", re.compile(r"\bdesigns?\b", flags=re.IGNORECASE)),
+    ("develop", re.compile(r"\bdevelop[a-z]*\b", flags=re.IGNORECASE)),
 )
 _FILENAME_FILE_FIELDS = (
     "name",
@@ -33,6 +49,7 @@ _FILENAME_FILE_FIELDS = (
     "markdown_path",
     "markdown_url",
     "matched_filename_terms",
+    "matched_content_terms",
     "agent_evidence",
 )
 _EVIDENCE_COVERAGE_FIELDS = (
@@ -43,6 +60,8 @@ _EVIDENCE_COVERAGE_FIELDS = (
     "is_markdown",
     "filename_match",
     "matched_filename_terms",
+    "content_match",
+    "matched_content_terms",
 )
 _REPOSITORY_SUMMARY_FIELDS = (
     "name",
@@ -50,9 +69,11 @@ _REPOSITORY_SUMMARY_FIELDS = (
     "status",
     "error",
     "markdown_filename_file_count",
+    "markdown_filename_and_content_file_count",
     "agent_evidence_file_count",
     "agent_evidence_markdown_file_count",
     "agent_evidence_filename_match_count",
+    "agent_evidence_filename_and_content_match_count",
     "agent_evidence_not_evaluated_count",
 )
 
@@ -66,34 +87,41 @@ class MarkdownFilenameAuditStatus(StrEnum):
 
 
 class MarkdownTreeClient(Protocol):
-    """Retrieve a complete revision-pinned GitHub tree."""
+    """Retrieve a complete revision-pinned tree and its text blobs."""
 
     def get_complete_tree(self, repository: str, revision: str) -> github_client.RepositoryTree:
         """Return every blob entry reachable from a repository revision."""
         ...
 
+    def get_text_blob(self, repository: str, blob_sha: str) -> str:
+        """Return one UTF-8-decoded Git blob."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class MarkdownFilenameFile:
-    """A Markdown file whose filename contains candidate terms."""
+    """A filename candidate with the content terms found in its body."""
 
     path: str
     matched_terms: tuple[str, ...]
+    matched_content_terms: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class AgentEvidenceFilenameCoverage:
-    """Whether an agent evidence path matches the filename strategy."""
+    """Whether an agent evidence path passes each candidate filter."""
 
     path: str
     is_markdown: bool
     filename_match: bool | None
     matched_terms: tuple[str, ...]
+    content_match: bool | None
+    matched_content_terms: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class RepositoryMarkdownFilenameAudit:
-    """Filename candidates and agent-evidence coverage for one repository."""
+    """Sequential-filter candidates and evidence coverage for one repository."""
 
     candidate: repository.RepositoryCandidate
     status: MarkdownFilenameAuditStatus
@@ -121,7 +149,7 @@ class MarkdownFilenameAuditReport:
 
 
 class MarkdownFilenameAuditor:
-    """Scan revision-pinned Markdown filenames without reading file contents."""
+    """Apply sequential filename and content filters to pinned Markdown files."""
 
     __slots__ = ("_agent_evidence", "_client")
 
@@ -205,12 +233,17 @@ def matched_filename_terms(filename: str) -> tuple[str, ...]:
     return tuple(term for term, pattern in _FILENAME_TERM_PATTERNS if pattern.search(filename) is not None)
 
 
+def matched_content_terms(content: str) -> tuple[str, ...]:
+    """Return normalized candidate terms present in Markdown content."""
+    return tuple(term for term, pattern in _CONTENT_TERM_PATTERNS if pattern.search(content) is not None)
+
+
 def scan_github_markdown_filenames(
     client: MarkdownTreeClient,
     repository: str,
     revision: str,
 ) -> tuple[MarkdownFilenameFile, ...]:
-    """Return Markdown files whose basenames contain candidate terms."""
+    """Return filename candidates annotated with matching content terms."""
     tree = client.get_complete_tree(repository, revision)
     matches: list[MarkdownFilenameFile] = []
     for entry in sorted(tree.entries, key=lambda candidate: candidate.path):
@@ -218,8 +251,16 @@ def scan_github_markdown_filenames(
         if entry.mode == "120000" or path.suffix.casefold() != ".md":
             continue
         matched_terms = matched_filename_terms(path.name)
-        if matched_terms:
-            matches.append(MarkdownFilenameFile(path=entry.path, matched_terms=matched_terms))
+        if not matched_terms:
+            continue
+        content_terms = matched_content_terms(client.get_text_blob(repository, entry.sha))
+        matches.append(
+            MarkdownFilenameFile(
+                path=entry.path,
+                matched_terms=matched_terms,
+                matched_content_terms=content_terms,
+            ),
+        )
     return tuple(matches)
 
 
@@ -228,7 +269,7 @@ def compare_agent_evidence(
     *,
     evidence_paths: tuple[str, ...],
 ) -> tuple[AgentEvidenceFilenameCoverage, ...]:
-    """Report whether each agent evidence path matches the filename strategy."""
+    """Report whether each agent evidence path passes each filter stage."""
     matched_files = {match.path: match for match in matches}
     coverage: list[AgentEvidenceFilenameCoverage] = []
     for path in sorted(set(evidence_paths)):
@@ -239,6 +280,8 @@ def compare_agent_evidence(
                 is_markdown=PurePosixPath(path).suffix.casefold() == ".md",
                 filename_match=match is not None,
                 matched_terms=match.matched_terms if match is not None else (),
+                content_match=bool(match.matched_content_terms) if match is not None else None,
+                matched_content_terms=match.matched_content_terms if match is not None else (),
             ),
         )
     return tuple(coverage)
@@ -270,7 +313,11 @@ def _filename_file_rows(
     rows: list[dict[str, object]] = []
     for result in results:
         evidence_paths = {coverage.path for coverage in result.agent_evidence}
-        rows.extend(_filename_file_row(result.candidate, match, evidence_paths) for match in result.filename_files)
+        rows.extend(
+            _filename_file_row(result.candidate, match, evidence_paths)
+            for match in result.filename_files
+            if match.matched_content_terms
+        )
     return rows
 
 
@@ -285,6 +332,7 @@ def _filename_file_row(
         "markdown_path": match.path,
         "markdown_url": _github_file_url(candidate, match.path),
         "matched_filename_terms": "|".join(match.matched_terms),
+        "matched_content_terms": "|".join(match.matched_content_terms),
         "agent_evidence": match.path in evidence_paths,
     }
 
@@ -310,6 +358,8 @@ def _evidence_coverage_row(
         "is_markdown": coverage.is_markdown,
         "filename_match": coverage.filename_match,
         "matched_filename_terms": "|".join(coverage.matched_terms),
+        "content_match": coverage.content_match,
+        "matched_content_terms": "|".join(coverage.matched_content_terms),
     }
 
 
@@ -323,10 +373,16 @@ def _repository_summary_rows(
             "status": result.status.value,
             "error": result.error,
             "markdown_filename_file_count": len(result.filename_files),
+            "markdown_filename_and_content_file_count": sum(
+                bool(match.matched_content_terms) for match in result.filename_files
+            ),
             "agent_evidence_file_count": len(result.agent_evidence),
             "agent_evidence_markdown_file_count": sum(coverage.is_markdown for coverage in result.agent_evidence),
             "agent_evidence_filename_match_count": sum(
                 coverage.filename_match is True for coverage in result.agent_evidence
+            ),
+            "agent_evidence_filename_and_content_match_count": sum(
+                coverage.content_match is True for coverage in result.agent_evidence
             ),
             "agent_evidence_not_evaluated_count": sum(
                 coverage.filename_match is None for coverage in result.agent_evidence
@@ -364,6 +420,8 @@ def _unevaluated_agent_evidence(
             is_markdown=PurePosixPath(path).suffix.casefold() == ".md",
             filename_match=None,
             matched_terms=(),
+            content_match=None,
+            matched_content_terms=(),
         )
         for path in sorted(set(evidence_paths))
     )

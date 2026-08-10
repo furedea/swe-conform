@@ -40,7 +40,23 @@ def _indexed_candidate(index: int) -> repository.RepositoryCandidate:
 def test_filename_terms_ignore_letter_case() -> None:
     terms = markdown_filename_audit.matched_filename_terms("CoDiNg_GuIdElInE.MD")
 
-    assert terms == ("guideline",)
+    assert terms == ("guideline", "coding")
+
+
+@pytest.mark.parametrize(
+    ("term", "filename"),
+    [
+        ("develop", "DEVELOPMENT.md"),
+        ("develop", "Developers.md"),
+        ("develop", "developing.md"),
+        ("architecture", "ARCHITECTURES.md"),
+        ("design", "redesign.md"),
+        ("coding", "CODING.md"),
+        ("hacking", "HACKING.md"),
+    ],
+)
+def test_filename_terms_match_added_convention_name_substrings(term: str, filename: str) -> None:
+    assert markdown_filename_audit.matched_filename_terms(filename) == (term,)
 
 
 @pytest.mark.parametrize(
@@ -59,8 +75,8 @@ def test_filename_terms_match_singular_and_plural_forms(
     singular: str,
     plural: str,
 ) -> None:
-    assert markdown_filename_audit.matched_filename_terms(f"coding-{singular}.md") == (term,)
-    assert markdown_filename_audit.matched_filename_terms(f"coding-{plural}.md") == (term,)
+    assert markdown_filename_audit.matched_filename_terms(f"project-{singular}.md") == (term,)
+    assert markdown_filename_audit.matched_filename_terms(f"project-{plural}.md") == (term,)
 
 
 @pytest.mark.parametrize(
@@ -80,16 +96,43 @@ def test_filename_terms_match_named_files_without_letter_case(
     assert markdown_filename_audit.matched_filename_terms(filename) == (term,)
 
 
-def test_scan_uses_the_github_tree_without_fetching_file_contents(mocker: MockerFixture) -> None:
+def test_content_terms_match_configured_forms_without_letter_case() -> None:
+    content = (
+        "STYLES guides Guidelines standard conventions RULES "
+        "architectures designs development developers developing.\n"
+    )
+
+    terms = markdown_filename_audit.matched_content_terms(content)
+
+    assert terms == (
+        "style",
+        "guide",
+        "guideline",
+        "standard",
+        "convention",
+        "rule",
+        "architecture",
+        "design",
+        "develop",
+    )
+
+
+def test_scan_applies_content_terms_only_after_the_filename_filter(mocker: MockerFixture) -> None:
     client = mocker.Mock()
     client.get_complete_tree.return_value = github_client.RepositoryTree(
         entries=(
             github_client.TreeEntry(path="README.MD", sha="blob-readme", size=10),
+            github_client.TreeEntry(path="DESIGN.md", sha="blob-design", size=10),
             github_client.TreeEntry(path="CONTRIBUTING.mdx", sha="blob-mdx", size=20),
             github_client.TreeEntry(path="src/main.py", sha="blob-python", size=30),
         ),
         truncated=False,
     )
+    contents = {
+        "blob-design": "Runtime overview without a candidate term.\n",
+        "blob-readme": "Development guidelines.\n",
+    }
+    client.get_text_blob.side_effect = lambda _repository, blob_sha: contents[blob_sha]
 
     matches = markdown_filename_audit.scan_github_markdown_filenames(
         client,
@@ -99,12 +142,21 @@ def test_scan_uses_the_github_tree_without_fetching_file_contents(mocker: Mocker
 
     assert matches == (
         markdown_filename_audit.MarkdownFilenameFile(
+            path="DESIGN.md",
+            matched_terms=("design",),
+            matched_content_terms=(),
+        ),
+        markdown_filename_audit.MarkdownFilenameFile(
             path="README.MD",
             matched_terms=("readme",),
+            matched_content_terms=("guideline", "develop"),
         ),
     )
     client.get_complete_tree.assert_called_once_with("example/project", "0123456789abcdef")
-    client.get_text_file.assert_not_called()
+    assert client.get_text_blob.call_args_list == [
+        mocker.call("example/project", "blob-design"),
+        mocker.call("example/project", "blob-readme"),
+    ]
 
 
 def test_scan_excludes_markdown_symlinks(mocker: MockerFixture) -> None:
@@ -157,12 +209,18 @@ def test_compare_agent_evidence_reports_filename_candidate_coverage() -> None:
         markdown_filename_audit.MarkdownFilenameFile(
             path="CONTRIBUTING.md",
             matched_terms=("contributing",),
+            matched_content_terms=("style",),
+        ),
+        markdown_filename_audit.MarkdownFilenameFile(
+            path="README.md",
+            matched_terms=("readme",),
+            matched_content_terms=(),
         ),
     )
 
     coverage = markdown_filename_audit.compare_agent_evidence(
         matches,
-        evidence_paths=("CONTRIBUTING.md", "docs/testing.md", "src/example.py"),
+        evidence_paths=("CONTRIBUTING.md", "README.md", "docs/testing.md", "src/example.py"),
     )
 
     assert coverage == (
@@ -171,18 +229,32 @@ def test_compare_agent_evidence_reports_filename_candidate_coverage() -> None:
             is_markdown=True,
             filename_match=True,
             matched_terms=("contributing",),
+            content_match=True,
+            matched_content_terms=("style",),
+        ),
+        markdown_filename_audit.AgentEvidenceFilenameCoverage(
+            path="README.md",
+            is_markdown=True,
+            filename_match=True,
+            matched_terms=("readme",),
+            content_match=False,
+            matched_content_terms=(),
         ),
         markdown_filename_audit.AgentEvidenceFilenameCoverage(
             path="docs/testing.md",
             is_markdown=True,
             filename_match=False,
             matched_terms=(),
+            content_match=None,
+            matched_content_terms=(),
         ),
         markdown_filename_audit.AgentEvidenceFilenameCoverage(
             path="src/example.py",
             is_markdown=False,
             filename_match=False,
             matched_terms=(),
+            content_match=None,
+            matched_content_terms=(),
         ),
     )
 
@@ -193,6 +265,7 @@ def test_auditor_compares_filename_candidates_with_agent_evidence(mocker: Mocker
         entries=(github_client.TreeEntry(path="README.md", sha="blob-readme", size=10),),
         truncated=False,
     )
+    client.get_text_blob.return_value = "Coding standards.\n"
     auditor = markdown_filename_audit.MarkdownFilenameAuditor(
         client=client,
         agent_evidence={
@@ -207,6 +280,7 @@ def test_auditor_compares_filename_candidates_with_agent_evidence(mocker: Mocker
         markdown_filename_audit.MarkdownFilenameFile(
             path="README.md",
             matched_terms=("readme",),
+            matched_content_terms=("standard",),
         ),
     )
     assert result.agent_evidence[0].filename_match is True
@@ -256,6 +330,12 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
             markdown_filename_audit.MarkdownFilenameFile(
                 path="CONTRIBUTING.md",
                 matched_terms=("contributing",),
+                matched_content_terms=("style", "guideline"),
+            ),
+            markdown_filename_audit.MarkdownFilenameFile(
+                path="DESIGN.md",
+                matched_terms=("design",),
+                matched_content_terms=(),
             ),
         ),
         agent_evidence=(
@@ -264,6 +344,8 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
                 is_markdown=True,
                 filename_match=True,
                 matched_terms=("contributing",),
+                content_match=True,
+                matched_content_terms=("style", "guideline"),
             ),
         ),
     )
@@ -288,6 +370,7 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
             "markdown_path": "CONTRIBUTING.md",
             "markdown_url": ("https://github.com/example/project/blob/0123456789abcdef/CONTRIBUTING.md"),
             "matched_filename_terms": "contributing",
+            "matched_content_terms": "style|guideline",
             "agent_evidence": "True",
         },
     ]
@@ -297,10 +380,13 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
     ) as input_file:
         coverage_rows = list(csv.DictReader(input_file))
     assert coverage_rows[0]["filename_match"] == "True"
+    assert coverage_rows[0]["content_match"] == "True"
+    assert coverage_rows[0]["matched_content_terms"] == "style|guideline"
     with (tmp_path / "repository_filename_summary.csv").open(
         encoding="utf-8",
         newline="",
     ) as input_file:
         summary_rows = list(csv.DictReader(input_file))
-    assert summary_rows[0]["markdown_filename_file_count"] == "1"
+    assert summary_rows[0]["markdown_filename_file_count"] == "2"
+    assert summary_rows[0]["markdown_filename_and_content_file_count"] == "1"
     assert not (tmp_path / "markdown_term_files.csv").exists()
