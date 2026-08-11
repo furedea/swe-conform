@@ -151,7 +151,7 @@ def test_batch_request_uses_classification_prompt_and_schema_files() -> None:
     )
 
     body = cast(dict[str, object], request["body"])
-    prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v10.md"
+    prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v11.md"
     assert body["instructions"] == prompt_path.read_text(encoding="utf-8")
     text = cast(dict[str, object], body["text"])
     output_format = cast(dict[str, object], text["format"])
@@ -263,7 +263,7 @@ def test_prepare_cost_pilot_writes_twenty_unique_batch_requests(
     configuration = json.loads((output_dir / "run_configuration.json").read_text(encoding="utf-8"))
     assert configuration["model"] == "gpt-5.6-luna"
     assert configuration["max_output_tokens"] == 2_000
-    assert configuration["prompt_version"] == "code-test-rule-v10"
+    assert configuration["prompt_version"] == "code-test-rule-v11"
 
 
 def test_prepare_cost_pilot_can_prepare_all_candidates(
