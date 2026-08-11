@@ -212,6 +212,7 @@ def _add_classify_markdown_arguments(
     )
     evaluate_parser.add_argument("--output-dir", type=Path, required=True)
     evaluate_parser.add_argument("--checklist-csv", type=Path, required=True)
+    evaluate_parser.add_argument("--repository-csv", type=Path)
     codex_review_parser = actions.add_parser(
         "codex-review",
         help="Extend an existing checklist with Codex-reviewed candidates",
@@ -544,12 +545,17 @@ def _classify_markdown(arguments: argparse.Namespace) -> None:
         report = markdown_evaluation.evaluate_classifications(
             classified_files_path=arguments.output_dir / "classified_files.csv",
             checklist_path=arguments.checklist_csv,
+            repository_csv_path=arguments.repository_csv,
             output_dir=evaluation_dir,
         )
         print(
             json.dumps(
                 {
                     "human_labeled_files": report.human_labeled_files,
+                    "input_repositories": report.input_repositories,
+                    "human_labeled_repositories": report.human_labeled_repositories,
+                    "human_pass_repositories": report.human_pass_repositories,
+                    "llm_pass_repositories": report.llm_pass_repositories,
                     "resolved_predictions": report.resolved_predictions,
                     "true_positives": report.true_positives,
                     "false_positives": report.false_positives,
