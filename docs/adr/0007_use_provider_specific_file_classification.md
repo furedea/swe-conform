@@ -1,7 +1,8 @@
 # ADR-0007: Use provider-specific per-file classification execution
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-06
+- Superseded by: ADR-0008
 
 ## Context
 

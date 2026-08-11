@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 import httpx
 
 import openai_responses_client
+import responses_provider
 
 _BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -46,15 +47,9 @@ class OpenRouterResponsesClient(openai_responses_client.OpenAIResponsesClient):
         return super().complete_json(
             instructions=instructions,
             input_text=input_text,
-            model=_openrouter_model(model),
+            model=responses_provider.model_id("openrouter", model),
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             schema_name=schema_name,
             schema=schema,
         )
-
-
-def _openrouter_model(model: str) -> str:
-    if not model or "/" in model:
-        return model
-    return f"openai/{model}"

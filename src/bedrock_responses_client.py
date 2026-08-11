@@ -1,0 +1,54 @@
+"""Amazon Bedrock Responses API adapter for structured classification."""
+
+from collections.abc import Callable, Mapping
+
+import httpx
+
+import openai_responses_client
+import responses_provider
+
+
+class BedrockResponsesClient(openai_responses_client.OpenAIResponsesClient):
+    """Send GPT-5.6 Luna Responses requests through Amazon Bedrock Mantle."""
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        region: str,
+        http_client: httpx.Client | None = None,
+        max_attempts: int = 3,
+        retry_wait: Callable[[float], None] | None = None,
+    ) -> None:
+        super().__init__(
+            api_key=api_key,
+            base_url=f"https://bedrock-mantle.{region}.api.aws/openai/v1",
+            http_client=http_client,
+            max_attempts=max_attempts,
+            provider_name="Amazon Bedrock",
+            retry_wait=retry_wait,
+        )
+
+    def complete_json(
+        self,
+        *,
+        instructions: str,
+        input_text: str,
+        model: str,
+        reasoning_effort: str,
+        max_output_tokens: int,
+        schema_name: str,
+        schema: Mapping[str, object],
+    ) -> openai_responses_client.JsonResponse:
+        """Return one structured response using the Bedrock Luna model ID."""
+        return super().complete_json(
+            instructions=instructions,
+            input_text=input_text,
+            model=responses_provider.model_id("bedrock", model),
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            schema_name=schema_name,
+            schema=schema,
+        )

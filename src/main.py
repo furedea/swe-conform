@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import batch_runner
+import bedrock_responses_client
 import cache_runner
 import codex_cli_client
 import github_client
@@ -30,6 +31,7 @@ import repository_cache
 import repository_sampling
 import repository_tree
 import repository_workspace
+import responses_provider
 import result_store
 
 _DEFAULT_INPUT_DIR = Path("docs/repository-candidates")
@@ -171,14 +173,33 @@ def _add_classify_markdown_arguments(
 ) -> None:
     classify_parser = subparsers.add_parser(
         "classify-markdown",
-        help="Classify prepared Markdown files through the OpenRouter Responses API",
+        help="Classify prepared Markdown files through a Responses API provider",
     )
     actions = classify_parser.add_subparsers(dest="classification_action", required=True)
     prepare_parser = actions.add_parser("prepare", help="Sample candidates and prepare per-file requests")
     _add_markdown_preparation_arguments(prepare_parser, default_reasoning_effort="max")
-    run_parser = actions.add_parser("run", help="Run prepared requests through OpenRouter")
+    settings = markdown_batch.PROJECT_RULE_CLASSIFICATION_SETTINGS
+    prepare_parser.set_defaults(
+        provider=settings.provider.value,
+        bedrock_region=settings.region,
+        model=settings.model,
+        reasoning_effort=settings.reasoning_effort,
+        max_output_tokens=settings.max_output_tokens,
+        workers=settings.workers,
+    )
+    run_parser = actions.add_parser("run", help="Run prepared requests through a Responses API provider")
     run_parser.add_argument("--output-dir", type=Path, required=True)
-    run_parser.add_argument("--workers", type=_positive_integer, default=_DEFAULT_WORKERS)
+    run_parser.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
+        default=settings.provider.value,
+    )
+    run_parser.add_argument(
+        "--bedrock-region",
+        choices=responses_provider.BEDROCK_LUNA_REGIONS,
+        default=settings.region,
+    )
+    run_parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
     export_parser = actions.add_parser(
         "export-pass",
         help="Materialize pass- and review-classified files for manual review",
@@ -551,16 +572,33 @@ def _classify_markdown(arguments: argparse.Namespace) -> None:
     if arguments.classification_action == "codex-review":
         _build_full_codex_checklist(arguments)
         return
-    client = openrouter_responses_client.OpenRouterResponsesClient(api_key=openrouter_credential())
+    client = _classification_client(arguments)
     try:
         report = markdown_responses_runner.run_prepared_classification(
             output_dir=arguments.output_dir,
             client=client,
+            provider=arguments.provider,
+            region=(
+                arguments.bedrock_region
+                if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value
+                else None
+            ),
             workers=arguments.workers,
         )
     finally:
         client.close()
     print(json.dumps(report, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _classification_client(
+    arguments: argparse.Namespace,
+) -> bedrock_responses_client.BedrockResponsesClient | openrouter_responses_client.OpenRouterResponsesClient:
+    if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value:
+        return bedrock_responses_client.BedrockResponsesClient(
+            api_key=bedrock_credential(),
+            region=arguments.bedrock_region,
+        )
+    return openrouter_responses_client.OpenRouterResponsesClient(api_key=openrouter_credential())
 
 
 def _build_full_codex_checklist(arguments: argparse.Namespace) -> None:
@@ -687,6 +725,15 @@ def openrouter_credential() -> str:
     if credential:
         return credential
     msg = "OPENROUTER_API_KEY is required"
+    raise RuntimeError(msg)
+
+
+def bedrock_credential() -> str:
+    """Load Amazon Bedrock API authentication from the environment."""
+    credential = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    if credential:
+        return credential
+    msg = "AWS_BEARER_TOKEN_BEDROCK is required"
     raise RuntimeError(msg)
 
 

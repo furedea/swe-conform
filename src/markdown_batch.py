@@ -14,16 +14,17 @@ from typing import Protocol, cast
 
 import github_client
 import markdown_batch_lifecycle
+import responses_provider
 
 STRATUM_COUNT = 5
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
-CLASSIFICATION_PROMPT_VERSION = "code-test-rule-v10"
+CLASSIFICATION_PROMPT_VERSION = "code-test-rule-v15"
 BATCH_INPUT_USD_PER_MILLION_TOKENS = 0.10
 BATCH_CACHED_INPUT_USD_PER_MILLION_TOKENS = 0.01
 BATCH_CACHE_WRITE_INPUT_USD_PER_MILLION_TOKENS = 0.125
 BATCH_OUTPUT_USD_PER_MILLION_TOKENS = 0.60
 PRICING_DATE = "2026-08-06"
-_CLASSIFICATION_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v10.md"
+_CLASSIFICATION_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v15.md"
 _CLASSIFICATION_SCHEMA_PATH = (
     Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_schema.json"
 )
@@ -35,6 +36,28 @@ _CANDIDATE_COLUMNS = frozenset(
         "markdown_url",
         "matched_filename_terms",
     },
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationSettings:
+    """Immutable settings for one Markdown classification experiment."""
+
+    provider: responses_provider.ResponsesProvider
+    region: str | None
+    model: str
+    reasoning_effort: str
+    max_output_tokens: int
+    workers: int
+
+
+PROJECT_RULE_CLASSIFICATION_SETTINGS = ClassificationSettings(
+    provider=responses_provider.ResponsesProvider.BEDROCK,
+    region="us-east-1",
+    model="gpt-5.6-luna",
+    reasoning_effort="max",
+    max_output_tokens=32_000,
+    workers=16,
 )
 
 
@@ -146,17 +169,34 @@ def collect_precomputed_cost_pilot(
     output_dir: Path,
     output_content: bytes,
     error_content: bytes,
+    provider: str = "openrouter",
 ) -> Mapping[str, object]:
     """Verify Responses results produced without a Batch API."""
-    return markdown_batch_lifecycle.collect_precomputed_cost_pilot(
-        output_dir=output_dir,
-        output_content=output_content,
-        error_content=error_content,
-        input_usd_per_million_tokens=BATCH_INPUT_USD_PER_MILLION_TOKENS,
-        cached_input_usd_per_million_tokens=BATCH_CACHED_INPUT_USD_PER_MILLION_TOKENS,
-        cache_write_input_usd_per_million_tokens=BATCH_CACHE_WRITE_INPUT_USD_PER_MILLION_TOKENS,
-        output_usd_per_million_tokens=BATCH_OUTPUT_USD_PER_MILLION_TOKENS,
+    pricing = responses_provider.pricing(provider)
+    report = dict(
+        markdown_batch_lifecycle.collect_precomputed_cost_pilot(
+            output_dir=output_dir,
+            output_content=output_content,
+            error_content=error_content,
+            input_usd_per_million_tokens=pricing.input_usd_per_million_tokens,
+            cached_input_usd_per_million_tokens=pricing.cached_input_usd_per_million_tokens,
+            cache_write_input_usd_per_million_tokens=pricing.cache_write_input_usd_per_million_tokens,
+            output_usd_per_million_tokens=pricing.output_usd_per_million_tokens,
+        ),
     )
+    report.update(
+        {
+            "cost_source": (
+                "provider_reported" if report["provider_reported_cost_usd"] is not None else pricing.source
+            ),
+            "pricing_date": pricing.date,
+            "input_usd_per_million_tokens": pricing.input_usd_per_million_tokens,
+            "cached_input_usd_per_million_tokens": pricing.cached_input_usd_per_million_tokens,
+            "cache_write_input_usd_per_million_tokens": pricing.cache_write_input_usd_per_million_tokens,
+            "output_usd_per_million_tokens": pricing.output_usd_per_million_tokens,
+        },
+    )
+    return report
 
 
 def load_candidates(path: Path) -> tuple[MarkdownCandidate, ...]:
@@ -369,6 +409,7 @@ def prepare_cost_pilot(
             "model": model,
             "reasoning_effort": reasoning_effort,
             "max_output_tokens": max_output_tokens,
+            "workers": workers,
             "prompt_version": CLASSIFICATION_PROMPT_VERSION,
             "classification_contract_sha256": _classification_contract_sha256(),
             "pricing_date": PRICING_DATE,

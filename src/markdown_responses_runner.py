@@ -1,5 +1,6 @@
 """Concurrent per-file Markdown classification through a Responses API."""
 
+import hashlib
 import json
 import time
 from collections.abc import Mapping
@@ -10,9 +11,11 @@ from typing import Protocol, cast
 
 import markdown_batch
 import openai_responses_client
+import responses_provider
 
 _INPUT_FILENAME = "batch_input.jsonl"
 _CHECKPOINT_FILENAME = "responses_checkpoint.jsonl"
+_EXECUTION_FILENAME = "responses_execution.json"
 _COST_FILENAME = "cost_summary.json"
 _RUN_FILENAME = "responses_run.json"
 
@@ -39,20 +42,45 @@ def run_prepared_classification(
     *,
     output_dir: Path,
     client: ResponsesClient,
+    provider: str,
+    region: str | None,
     workers: int,
 ) -> Mapping[str, object]:
     """Classify prepared files concurrently and persist each completed response."""
     if workers < 1:
         msg = "workers must be at least 1"
         raise ValueError(msg)
-    requests = _prepared_requests(output_dir / _INPUT_FILENAME)
+    input_path = output_dir / _INPUT_FILENAME
+    requests = _prepared_requests(input_path)
+    requested_model, reasoning_effort, max_output_tokens = _request_configuration(requests)
+    provider_model = responses_provider.model_id(provider, requested_model)
     checkpoint_path = output_dir / _CHECKPOINT_FILENAME
+    _ensure_execution_configuration(
+        output_dir=output_dir,
+        input_path=input_path,
+        checkpoint_path=checkpoint_path,
+        provider=provider,
+        region=region,
+        requested_model=requested_model,
+        provider_model=provider_model,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+        workers=workers,
+    )
     results = _checkpoint_results(checkpoint_path)
     pending = tuple(request for custom_id, request in requests.items() if not _is_success(results.get(custom_id)))
     started_at = datetime.now(UTC)
     started = time.perf_counter()
+    concurrent_pending = pending
+    if pending:
+        preflight_result = _execute_request(client, pending[0])
+        preflight_id = str(preflight_result["custom_id"])
+        _append_checkpoint(checkpoint_path, preflight_result)
+        results[preflight_id] = preflight_result
+        _raise_for_fatal_preflight(preflight_result)
+        concurrent_pending = pending[1:]
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_execute_request, client, request): request for request in pending}
+        futures = {executor.submit(_execute_request, client, request): request for request in concurrent_pending}
         for future in as_completed(futures):
             result = future.result()
             custom_id = str(result["custom_id"])
@@ -68,11 +96,17 @@ def run_prepared_classification(
             output_dir=output_dir,
             output_content=_jsonl_bytes(output_documents),
             error_content=_jsonl_bytes(error_documents),
+            provider=provider,
         ),
     )
     report.update(
         {
-            "provider": "openrouter",
+            "provider": provider,
+            "region": region,
+            "requested_model": requested_model,
+            "provider_model": provider_model,
+            "reasoning_effort": reasoning_effort,
+            "max_output_tokens": max_output_tokens,
             "requested": len(requests),
             "attempted": len(pending),
             "resumed": len(requests) - len(pending),
@@ -94,13 +128,16 @@ def _execute_request(client: ResponsesClient, request: Mapping[str, object]) -> 
     try:
         response = _complete_request(client, request)
     except Exception as error:
+        error_document: dict[str, object] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+        if isinstance(error, openai_responses_client.ResponsesRequestError):
+            error_document["status_code"] = error.status_code
         return {
             "custom_id": custom_id,
             "response": None,
-            "error": {
-                "type": type(error).__name__,
-                "message": str(error),
-            },
+            "error": error_document,
             "elapsed_seconds": round(time.perf_counter() - started, 6),
         }
     return {
@@ -137,6 +174,15 @@ def _complete_request(
     )
 
 
+def _raise_for_fatal_preflight(result: Mapping[str, object]) -> None:
+    error = cast(Mapping[str, object], result.get("error") or {})
+    status_code = int(str(error.get("status_code", 0)))
+    if status_code not in {400, 401, 403}:
+        return
+    msg = f"Responses preflight failed: {error.get('message', '')}"
+    raise RuntimeError(msg)
+
+
 def _prepared_requests(path: Path) -> dict[str, Mapping[str, object]]:
     if not path.is_file():
         msg = f"prepared Responses input does not exist: {path}"
@@ -158,6 +204,61 @@ def _prepared_requests(path: Path) -> dict[str, Mapping[str, object]]:
         msg = f"prepared Responses input is empty: {path}"
         raise ValueError(msg)
     return requests
+
+
+def _request_configuration(requests: Mapping[str, Mapping[str, object]]) -> tuple[str, str, int]:
+    configurations = set()
+    for request in requests.values():
+        body = cast(Mapping[str, object], request.get("body") or {})
+        reasoning = cast(Mapping[str, object], body.get("reasoning") or {})
+        configurations.add(
+            (
+                str(body.get("model", "")),
+                str(reasoning.get("effort", "")),
+                int(str(body.get("max_output_tokens", 0))),
+            ),
+        )
+    if len(configurations) != 1:
+        msg = "prepared Responses requests must use one model, reasoning effort, and output-token limit"
+        raise ValueError(msg)
+    return configurations.pop()
+
+
+def _ensure_execution_configuration(
+    *,
+    output_dir: Path,
+    input_path: Path,
+    checkpoint_path: Path,
+    provider: str,
+    region: str | None,
+    requested_model: str,
+    provider_model: str,
+    reasoning_effort: str,
+    max_output_tokens: int,
+    workers: int,
+) -> None:
+    path = output_dir / _EXECUTION_FILENAME
+    expected = {
+        "schema_version": 2,
+        "provider": provider,
+        "region": region,
+        "requested_model": requested_model,
+        "provider_model": provider_model,
+        "reasoning_effort": reasoning_effort,
+        "max_output_tokens": max_output_tokens,
+        "workers": workers,
+        "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+    }
+    if not path.exists():
+        if checkpoint_path.exists():
+            msg = f"cannot verify provider for existing checkpoint without {path.name}"
+            raise ValueError(msg)
+        _write_json(path, expected)
+        return
+    actual = cast(Mapping[str, object], json.loads(path.read_text(encoding="utf-8")))
+    if actual != expected:
+        msg = f"Responses execution configuration does not match {path}"
+        raise ValueError(msg)
 
 
 def _checkpoint_results(path: Path) -> dict[str, Mapping[str, object]]:

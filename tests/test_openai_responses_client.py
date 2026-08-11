@@ -4,6 +4,7 @@ from dataclasses import astuple
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 
 import openai_responses_client
 
@@ -63,7 +64,7 @@ def test_client_reports_provider_error_body() -> None:
         http_client=http_client,
     )
 
-    try:
+    with pytest.raises(openai_responses_client.ResponsesRequestError) as caught:
         client.complete_json(
             instructions="system",
             input_text="documents",
@@ -73,12 +74,10 @@ def test_client_reports_provider_error_body() -> None:
             schema_name="classification",
             schema={"type": "object"},
         )
-    except RuntimeError as error:
-        assert "status=400" in str(error)
-        assert "invalid model" in str(error)
-        return
-    msg = "RuntimeError should include the provider error body"
-    raise AssertionError(msg)
+
+    assert caught.value.status_code == 400
+    assert "status=400" in str(caught.value)
+    assert "invalid model" in str(caught.value)
 
 
 def test_parse_json_response_reports_cache_read_and_write_tokens() -> None:

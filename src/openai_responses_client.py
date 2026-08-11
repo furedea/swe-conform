@@ -16,6 +16,16 @@ _ERROR_BODY_LIMIT = 2000
 _RETRYABLE_STATUS_CODES = frozenset({408, 429})
 
 
+class ResponsesRequestError(RuntimeError):
+    """A Responses HTTP failure with its provider status code."""
+
+    __slots__ = ("status_code",)
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass(frozen=True, slots=True)
 class JsonResponse:
     """Parsed structured output and provider-reported usage."""
@@ -115,7 +125,7 @@ class OpenAIResponsesClient:
                     f"{self._provider_name} Responses request failed: "
                     f"status={error.response.status_code} body={response_body}"
                 )
-                raise RuntimeError(msg) from error
+                raise ResponsesRequestError(msg, status_code=error.response.status_code) from error
             else:
                 return response
         msg = f"{self._provider_name} Responses request retry loop ended unexpectedly"
