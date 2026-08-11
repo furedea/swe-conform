@@ -332,6 +332,7 @@ def test_classify_markdown_evaluate_compares_human_decisions(
 ) -> None:
     run_dir = tmp_path / "file-judge"
     checklist_path = tmp_path / "checklist.csv"
+    repository_csv_path = tmp_path / "repositories.csv"
     evaluation_dir = run_dir / "evaluation"
     evaluate = mocker.patch(
         "main.markdown_evaluation.evaluate_classifications",
@@ -346,6 +347,10 @@ def test_classify_markdown_evaluate_compares_human_decisions(
             missing_predictions=0,
             checklist_rows=130,
             human_labeled_files=130,
+            input_repositories=50,
+            human_labeled_repositories=50,
+            human_pass_repositories=30,
+            llm_pass_repositories=28,
             output_dir=evaluation_dir,
         ),
     )
@@ -358,16 +363,23 @@ def test_classify_markdown_evaluate_compares_human_decisions(
             str(run_dir),
             "--checklist-csv",
             str(checklist_path),
+            "--repository-csv",
+            str(repository_csv_path),
         ],
     )
 
     evaluate.assert_called_once_with(
         classified_files_path=run_dir / "classified_files.csv",
         checklist_path=checklist_path,
+        repository_csv_path=repository_csv_path,
         output_dir=evaluation_dir,
     )
     output = json.loads(capsys.readouterr().out)
     assert output["false_positives"] == 3
+    assert output["input_repositories"] == 50
+    assert output["human_labeled_repositories"] == 50
+    assert output["human_pass_repositories"] == 30
+    assert output["llm_pass_repositories"] == 28
     assert output["resolved_accuracy"] == 0.96
     assert output["evaluation_dir"] == str(evaluation_dir)
 

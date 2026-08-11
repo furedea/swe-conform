@@ -74,6 +74,100 @@ def test_evaluation_reports_unresolved_model_decisions(tmp_path: Path) -> None:
     assert report.missing_predictions == 1
 
 
+def test_evaluation_reports_repository_scope_and_pass_counts(tmp_path: Path) -> None:
+    classified_files_path = tmp_path / "classified_files.csv"
+    _write_csv(
+        classified_files_path,
+        (
+            _classified_row("alpha-pass", "pass", repository="alpha/project"),
+            _classified_row("alpha-not-found", "not_found", repository="alpha/project"),
+            _classified_row("beta-pass", "pass", repository="beta/project"),
+            _classified_row("gamma-review", "review", repository="gamma/project"),
+        ),
+    )
+    checklist_path = tmp_path / "checklist.csv"
+    _write_csv(
+        checklist_path,
+        (
+            _checklist_row("alpha-pass", "pass", repository="alpha/project"),
+            _checklist_row("alpha-not-found", "not_found", repository="alpha/project"),
+            _checklist_row("beta-pass", "not_found", repository="beta/project"),
+            _checklist_row("gamma-review", "pass", repository="gamma/project"),
+        ),
+    )
+
+    report = markdown_evaluation.evaluate_classifications(
+        classified_files_path=classified_files_path,
+        checklist_path=checklist_path,
+        output_dir=tmp_path / "evaluation",
+    )
+
+    assert report.human_labeled_repositories == 3
+    assert report.human_pass_repositories == 2
+    assert report.llm_pass_repositories == 2
+
+
+def test_evaluation_uses_repository_csv_for_input_scope(tmp_path: Path) -> None:
+    classified_files_path = tmp_path / "classified_files.csv"
+    _write_csv(classified_files_path, (_classified_row("alpha-pass", "pass", repository="alpha/project"),))
+    checklist_path = tmp_path / "checklist.csv"
+    _write_csv(checklist_path, (_checklist_row("alpha-pass", "pass", repository="alpha/project"),))
+    repository_csv_path = tmp_path / "repositories.csv"
+    _write_csv(
+        repository_csv_path,
+        (
+            {"name": "alpha/project"},
+            {"name": "beta/project"},
+        ),
+    )
+
+    report = markdown_evaluation.evaluate_classifications(
+        classified_files_path=classified_files_path,
+        checklist_path=checklist_path,
+        repository_csv_path=repository_csv_path,
+        output_dir=tmp_path / "evaluation",
+    )
+
+    assert report.input_repositories == 2
+    assert report.human_labeled_repositories == 1
+    summary = json.loads((tmp_path / "evaluation" / "evaluation_summary.json").read_text(encoding="utf-8"))
+    assert summary["inputs"]["repositories"] == str(repository_csv_path)
+    assert summary["scope"]["input_repositories"] == 2
+    markdown_summary = (tmp_path / "evaluation" / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "| Input repositories | 2 |" in markdown_summary
+
+
+def test_evaluation_summary_includes_repository_scope(tmp_path: Path) -> None:
+    classified_files_path = tmp_path / "classified_files.csv"
+    _write_csv(
+        classified_files_path,
+        (
+            _classified_row("alpha-pass", "pass", repository="alpha/project"),
+            _classified_row("beta-not-found", "not_found", repository="beta/project"),
+        ),
+    )
+    checklist_path = tmp_path / "checklist.csv"
+    _write_csv(
+        checklist_path,
+        (
+            _checklist_row("alpha-pass", "pass", repository="alpha/project"),
+            _checklist_row("beta-not-found", "not_found", repository="beta/project"),
+        ),
+    )
+    output_dir = tmp_path / "evaluation"
+
+    markdown_evaluation.evaluate_classifications(
+        classified_files_path=classified_files_path,
+        checklist_path=checklist_path,
+        output_dir=output_dir,
+    )
+
+    summary = json.loads((output_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+    assert summary["scope"]["human_labeled_repositories"] == 2
+    assert summary["scope"]["human_pass_repositories"] == 1
+    assert summary["scope"]["llm_pass_repositories"] == 1
+
+
 def test_evaluation_writes_false_positive_details(tmp_path: Path) -> None:
     classified_files_path = tmp_path / "classified_files.csv"
     _write_csv(classified_files_path, (_classified_row("false-positive", "pass"),))
@@ -155,6 +249,9 @@ def test_evaluation_writes_summary_metrics(tmp_path: Path) -> None:
     }
     markdown_summary = (output_dir / "evaluation_summary.md").read_text(encoding="utf-8")
     assert "Metrics cover only the manually reviewed checklist subset." in markdown_summary
+    assert "| Human-labeled repositories | 1 |" in markdown_summary
+    assert "| Human-pass repositories | 1 |" in markdown_summary
+    assert "| LLM-pass repositories | 1 |" in markdown_summary
     assert "## Confusion matrix" in markdown_summary
     assert "Review, model_error, and missing predictions count as incorrect." in markdown_summary
 

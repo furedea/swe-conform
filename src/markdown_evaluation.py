@@ -48,6 +48,10 @@ class ClassificationEvaluation:
     missing_predictions: int
     checklist_rows: int
     human_labeled_files: int
+    input_repositories: int | None
+    human_labeled_repositories: int
+    human_pass_repositories: int
+    llm_pass_repositories: int
     output_dir: Path
 
     @property
@@ -77,6 +81,7 @@ def evaluate_classifications(
     *,
     classified_files_path: Path,
     checklist_path: Path,
+    repository_csv_path: Path | None = None,
     output_dir: Path,
 ) -> ClassificationEvaluation:
     """Evaluate model decisions against non-empty human checklist decisions."""
@@ -130,9 +135,12 @@ def evaluate_classifications(
     )
     repository_rows = _repository_metrics(ordered_rows)
     _write_csv(output_dir / "repository_metrics.csv", _REPOSITORY_FIELDS, repository_rows)
+    repository_scope = _repository_scope(ordered_rows)
     report = ClassificationEvaluation(
         checklist_rows=len(checklist_rows),
         human_labeled_files=human_labeled_files,
+        input_repositories=_input_repository_count(repository_csv_path),
+        **repository_scope,
         output_dir=output_dir,
         **counts,
     )
@@ -140,6 +148,7 @@ def evaluate_classifications(
         report,
         classified_files_path=classified_files_path,
         checklist_path=checklist_path,
+        repository_csv_path=repository_csv_path,
         evaluated_rows=ordered_rows,
     )
     _write_json(output_dir / "evaluation_summary.json", summary)
@@ -169,6 +178,12 @@ def _rows_by_url(path: Path, *, url_field: str) -> dict[str, dict[str, str]]:
             raise ValueError(msg)
         rows_by_url[url] = row
     return rows_by_url
+
+
+def _input_repository_count(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    return len({row.get("name", "").strip() for row in _csv_rows(path) if row.get("name", "").strip()})
 
 
 def _validate_human_decisions(rows: tuple[dict[str, str], ...]) -> None:
@@ -222,16 +237,22 @@ def _summary_document(
     *,
     classified_files_path: Path,
     checklist_path: Path,
+    repository_csv_path: Path | None,
     evaluated_rows: list[dict[str, str]],
 ) -> dict[str, object]:
     return {
         "inputs": {
             "classified_files": str(classified_files_path),
             "checklist": str(checklist_path),
+            "repositories": str(repository_csv_path) if repository_csv_path is not None else None,
         },
         "scope": {
             "checklist_files": report.checklist_rows,
             "human_labeled_files": report.human_labeled_files,
+            "input_repositories": report.input_repositories,
+            "human_labeled_repositories": report.human_labeled_repositories,
+            "human_pass_repositories": report.human_pass_repositories,
+            "llm_pass_repositories": report.llm_pass_repositories,
             "human_unlabeled_files": report.checklist_rows - report.human_labeled_files,
             "matched_predictions": report.human_labeled_files - report.missing_predictions,
             "resolved_predictions": report.resolved_predictions,
@@ -304,6 +325,10 @@ def _markdown_summary(
         "| --- | ---: |",
         f"| Checklist files | {report.checklist_rows} |",
         f"| Human-labeled files | {report.human_labeled_files} |",
+        f"| Input repositories | {_optional_count(report.input_repositories)} |",
+        f"| Human-labeled repositories | {report.human_labeled_repositories} |",
+        f"| Human-pass repositories | {report.human_pass_repositories} |",
+        f"| LLM-pass repositories | {report.llm_pass_repositories} |",
         f"| Resolved model decisions | {report.resolved_predictions} |",
         f"| Review decisions | {report.review_decisions} |",
         f"| Model errors | {report.model_errors} |",
@@ -381,6 +406,18 @@ def _repository_metrics(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     )
 
 
+def _repository_scope(rows: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        "human_labeled_repositories": len({row["repository"] for row in rows}),
+        "human_pass_repositories": len(
+            {row["repository"] for row in rows if row["human_decision"] == "pass"},
+        ),
+        "llm_pass_repositories": len(
+            {row["repository"] for row in rows if row["llm_decision"] == "pass"},
+        ),
+    }
+
+
 def _repository_metric(repository: str, rows: list[dict[str, str]]) -> dict[str, str]:
     outcome_counts = {outcome: sum(row["outcome"] == outcome for row in rows) for outcome in _outcomes()}
     resolved = sum(
@@ -430,6 +467,12 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _optional_count(value: int | None) -> str:
+    if value is None:
+        return "N/A"
+    return str(value)
 
 
 def _f1(precision: float | None, recall: float | None) -> float | None:
