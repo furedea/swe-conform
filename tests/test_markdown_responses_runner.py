@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from pytest_mock import MockerFixture
 
 import guideline
@@ -42,6 +43,8 @@ def test_runner_classifies_each_prepared_file_and_sums_provider_cost(
     report = markdown_responses_runner.run_prepared_classification(
         output_dir=tmp_path,
         client=client,
+        provider="openrouter",
+        region=None,
         workers=2,
     )
 
@@ -54,6 +57,106 @@ def test_runner_classifies_each_prepared_file_and_sums_provider_cost(
     assert report["provider_reported_cost_usd"] == 0.00002
     assert float(str(report["elapsed_seconds"])) >= 0
     assert (tmp_path / "responses_checkpoint.jsonl").exists()
+
+
+def test_runner_records_the_complete_execution_configuration(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    _write_prepared_files(tmp_path)
+    client = mocker.Mock()
+    value = {
+        "label": "NO",
+        "reason": "The document contains no rule.",
+        "quote": "",
+        "confidence": 9,
+    }
+    client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(input_tokens=100, output_tokens=10, total_tokens=110),
+        document=_response_document(value, cost_usd=0.000008),
+    )
+
+    report = markdown_responses_runner.run_prepared_classification(
+        output_dir=tmp_path,
+        client=client,
+        provider="bedrock",
+        region="us-east-1",
+        workers=2,
+    )
+
+    assert report["provider"] == "bedrock"
+    assert report["region"] == "us-east-1"
+    assert report["requested_model"] == "gpt-5.6-luna"
+    assert report["provider_model"] == "openai.gpt-5.6-luna"
+    assert report["reasoning_effort"] == "max"
+    assert report["max_output_tokens"] == 500
+    assert report["workers"] == 2
+    execution = json.loads((tmp_path / "responses_execution.json").read_text(encoding="utf-8"))
+    assert execution["requested_model"] == "gpt-5.6-luna"
+    assert execution["provider_model"] == "openai.gpt-5.6-luna"
+    assert execution["reasoning_effort"] == "max"
+    assert execution["max_output_tokens"] == 500
+    assert execution["workers"] == 2
+
+
+def test_runner_calculates_bedrock_luna_cost_from_usage(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    _write_prepared_files(tmp_path)
+    client = mocker.Mock()
+    value = {
+        "label": "NO",
+        "reason": "The document contains no rule.",
+        "quote": "",
+        "confidence": 9,
+    }
+    document = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": json.dumps(value)}],
+            },
+        ],
+        "usage": {
+            "input_tokens": 4_000,
+            "input_tokens_details": {
+                "cached_tokens": 1_920,
+                "cache_write_tokens": 1_024,
+            },
+            "output_tokens": 300,
+            "total_tokens": 4_300,
+        },
+    }
+    client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(
+            input_tokens=4_000,
+            output_tokens=300,
+            total_tokens=4_300,
+            cached_input_tokens=1_920,
+            cache_write_input_tokens=1_024,
+        ),
+        document=document,
+    )
+
+    report = markdown_responses_runner.run_prepared_classification(
+        output_dir=tmp_path,
+        client=client,
+        provider="bedrock",
+        region="us-east-1",
+        workers=2,
+    )
+
+    rows = list(csv.DictReader((tmp_path / "classified_files.csv").open(encoding="utf-8", newline="")))
+    assert {row["cost_usd"] for row in rows} == {"0.00095216"}
+    assert report["calculated_pilot_cost_usd"] == 0.001904
+    assert report["provider_reported_cost_usd"] is None
+    assert report["cost_source"] == "bedrock_published_pricing"
+    assert report["average_completed_cost_usd"] == 0.00095216
+    assert report["short_context_requests"] == 2
+    assert report["long_context_requests"] == 0
 
 
 def test_runner_reuses_successful_checkpoint_results(
@@ -78,6 +181,8 @@ def test_runner_reuses_successful_checkpoint_results(
     markdown_responses_runner.run_prepared_classification(
         output_dir=tmp_path,
         client=first_client,
+        provider="openrouter",
+        region=None,
         workers=2,
     )
     second_client = mocker.Mock()
@@ -85,6 +190,8 @@ def test_runner_reuses_successful_checkpoint_results(
     report = markdown_responses_runner.run_prepared_classification(
         output_dir=tmp_path,
         client=second_client,
+        provider="openrouter",
+        region=None,
         workers=2,
     )
 
@@ -117,6 +224,8 @@ def test_runner_retries_only_failed_checkpoint_results(
     first_report = markdown_responses_runner.run_prepared_classification(
         output_dir=tmp_path,
         client=first_client,
+        provider="openrouter",
+        region=None,
         workers=1,
     )
 
@@ -128,6 +237,8 @@ def test_runner_retries_only_failed_checkpoint_results(
     second_report = markdown_responses_runner.run_prepared_classification(
         output_dir=tmp_path,
         client=second_client,
+        provider="openrouter",
+        region=None,
         workers=1,
     )
 
@@ -136,6 +247,110 @@ def test_runner_retries_only_failed_checkpoint_results(
     assert second_report["resumed"] == 1
     assert second_report["completed"] == 2
     assert second_report["errors"] == 0
+
+
+def test_runner_rejects_a_checkpoint_from_another_provider(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    _write_prepared_files(tmp_path)
+    value = {
+        "label": "NO",
+        "reason": "The document contains no rule.",
+        "quote": "",
+        "confidence": 9,
+    }
+    response = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(input_tokens=100, output_tokens=10, total_tokens=110),
+        cost_usd=0.000008,
+        document=_response_document(value, cost_usd=0.000008),
+    )
+    first_client = mocker.Mock()
+    first_client.complete_json.return_value = response
+    markdown_responses_runner.run_prepared_classification(
+        output_dir=tmp_path,
+        client=first_client,
+        provider="openrouter",
+        region=None,
+        workers=2,
+    )
+    second_client = mocker.Mock()
+
+    with pytest.raises(ValueError, match="execution configuration does not match"):
+        markdown_responses_runner.run_prepared_classification(
+            output_dir=tmp_path,
+            client=second_client,
+            provider="bedrock",
+            region="us-east-1",
+            workers=2,
+        )
+
+    second_client.complete_json.assert_not_called()
+
+
+def test_runner_rejects_a_checkpoint_for_modified_prepared_input(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    _write_prepared_files(tmp_path)
+    value = {
+        "label": "NO",
+        "reason": "The document contains no rule.",
+        "quote": "",
+        "confidence": 9,
+    }
+    response = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(input_tokens=100, output_tokens=10, total_tokens=110),
+        cost_usd=0.000008,
+        document=_response_document(value, cost_usd=0.000008),
+    )
+    first_client = mocker.Mock()
+    first_client.complete_json.return_value = response
+    markdown_responses_runner.run_prepared_classification(
+        output_dir=tmp_path,
+        client=first_client,
+        provider="openrouter",
+        region=None,
+        workers=2,
+    )
+    input_path = tmp_path / "batch_input.jsonl"
+    input_path.write_text(f"{input_path.read_text(encoding='utf-8')}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="execution configuration does not match"):
+        markdown_responses_runner.run_prepared_classification(
+            output_dir=tmp_path,
+            client=mocker.Mock(),
+            provider="openrouter",
+            region=None,
+            workers=2,
+        )
+
+
+def test_runner_stops_after_one_authentication_failure(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    _write_prepared_files(tmp_path)
+    client = mocker.Mock()
+    client.complete_json.side_effect = openai_responses_client.ResponsesRequestError(
+        "status=401 body=invalid bearer token",
+        status_code=401,
+    )
+
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        markdown_responses_runner.run_prepared_classification(
+            output_dir=tmp_path,
+            client=client,
+            provider="bedrock",
+            region="us-east-1",
+            workers=16,
+        )
+
+    client.complete_json.assert_called_once()
+    checkpoint = (tmp_path / "responses_checkpoint.jsonl").read_text(encoding="utf-8")
+    assert "status=401" in checkpoint
 
 
 def _write_prepared_files(output_dir: Path) -> None:

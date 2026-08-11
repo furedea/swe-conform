@@ -1,4 +1,4 @@
-"""OpenRouter Responses API adapter for structured classification."""
+"""Amazon Bedrock Responses API adapter for structured classification."""
 
 from collections.abc import Callable, Mapping
 
@@ -7,11 +7,9 @@ import httpx
 import openai_responses_client
 import responses_provider
 
-_BASE_URL = "https://openrouter.ai/api/v1"
 
-
-class OpenRouterResponsesClient(openai_responses_client.OpenAIResponsesClient):
-    """Send structured Responses requests through OpenRouter."""
+class BedrockResponsesClient(openai_responses_client.OpenAIResponsesClient):
+    """Send GPT-5.6 Luna Responses requests through Amazon Bedrock Mantle."""
 
     __slots__ = ()
 
@@ -19,16 +17,17 @@ class OpenRouterResponsesClient(openai_responses_client.OpenAIResponsesClient):
         self,
         *,
         api_key: str,
+        region: str,
         http_client: httpx.Client | None = None,
         max_attempts: int = 3,
         retry_wait: Callable[[float], None] | None = None,
     ) -> None:
         super().__init__(
             api_key=api_key,
-            base_url=_BASE_URL,
+            base_url=f"https://bedrock-mantle.{region}.api.aws/openai/v1",
             http_client=http_client,
             max_attempts=max_attempts,
-            provider_name="OpenRouter",
+            provider_name="Amazon Bedrock",
             retry_wait=retry_wait,
         )
 
@@ -43,11 +42,11 @@ class OpenRouterResponsesClient(openai_responses_client.OpenAIResponsesClient):
         schema_name: str,
         schema: Mapping[str, object],
     ) -> openai_responses_client.JsonResponse:
-        """Return one structured response using an OpenRouter model slug."""
+        """Return one structured response using the Bedrock Luna model ID."""
         return super().complete_json(
             instructions=instructions,
             input_text=input_text,
-            model=responses_provider.model_id("openrouter", model),
+            model=responses_provider.model_id("bedrock", model),
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             schema_name=schema_name,

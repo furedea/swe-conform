@@ -311,6 +311,7 @@ def _cost_report(
     *,
     provider_reported_cost_usd: float | None = None,
 ) -> dict[str, object]:
+    completed_rows = tuple(row for row in rows if row["status"] != "model_error")
     costs_by_stratum: defaultdict[int, list[float]] = defaultdict(list)
     populations: dict[int, int] = {}
     for row in rows:
@@ -328,9 +329,14 @@ def _cost_report(
     if provider_reported_cost_usd is not None and calculated_pilot_cost and estimated_cost is not None:
         estimated_cost = round(estimated_cost * provider_reported_cost_usd / calculated_pilot_cost, 6)
     pilot_cost = provider_reported_cost_usd if provider_reported_cost_usd is not None else calculated_pilot_cost
+    average_completed_cost = (
+        round(sum(float(str(row["cost_usd"])) for row in completed_rows) / len(completed_rows), 9)
+        if completed_rows
+        else 0.0
+    )
     return {
         "sampled": len(rows),
-        "completed": sum(row["status"] != "model_error" for row in rows),
+        "completed": len(completed_rows),
         "errors": sum(row["status"] == "model_error" for row in rows),
         "status_counts": dict(sorted(_status_counts(rows).items())),
         "input_tokens": sum(int(str(row["input_tokens"])) for row in rows),
@@ -341,6 +347,13 @@ def _cost_report(
         "calculated_pilot_cost_usd": calculated_pilot_cost,
         "provider_reported_cost_usd": provider_reported_cost_usd,
         "pilot_cost_usd": round(pilot_cost, 6),
+        "average_completed_cost_usd": average_completed_cost,
+        "short_context_requests": sum(
+            int(str(row["input_tokens"])) <= _LONG_CONTEXT_THRESHOLD for row in completed_rows
+        ),
+        "long_context_requests": sum(
+            int(str(row["input_tokens"])) > _LONG_CONTEXT_THRESHOLD for row in completed_rows
+        ),
         "estimated_full_batch_usd": estimated_cost,
     }
 

@@ -151,7 +151,7 @@ def test_batch_request_uses_classification_prompt_and_schema_files() -> None:
     )
 
     body = cast(dict[str, object], request["body"])
-    prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v11.md"
+    prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v15.md"
     assert body["instructions"] == prompt_path.read_text(encoding="utf-8")
     text = cast(dict[str, object], body["text"])
     output_format = cast(dict[str, object], text["format"])
@@ -263,7 +263,8 @@ def test_prepare_cost_pilot_writes_twenty_unique_batch_requests(
     configuration = json.loads((output_dir / "run_configuration.json").read_text(encoding="utf-8"))
     assert configuration["model"] == "gpt-5.6-luna"
     assert configuration["max_output_tokens"] == 2_000
-    assert configuration["prompt_version"] == "code-test-rule-v11"
+    assert configuration["workers"] == 4
+    assert configuration["prompt_version"] == "code-test-rule-v15"
 
 
 def test_prepare_cost_pilot_can_prepare_all_candidates(
@@ -429,6 +430,37 @@ def test_collect_precomputed_cost_pilot_uses_per_response_provider_cost(
     assert rows[0]["cost_usd"] == "1.2e-05"
     assert report["provider_reported_cost_usd"] == 0.000012
     assert report["pilot_cost_usd"] == 0.000012
+
+
+def test_collect_precomputed_bedrock_cost_uses_long_context_rates(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "pilot"
+    output_dir.mkdir()
+    _write_collection_fixture(output_dir)
+    output = _batch_output_line(
+        "candidate-0001",
+        {
+            "label": "NO",
+            "reason": "The document contains no rule.",
+            "quote": "",
+            "confidence": 9,
+        },
+        input_tokens=272_001,
+        output_tokens=100,
+    )
+
+    report = markdown_batch.collect_precomputed_cost_pilot(
+        output_dir=output_dir,
+        output_content=f"{json.dumps(output)}\n".encode(),
+        error_content=b"",
+        provider="bedrock",
+    )
+
+    rows = list(csv.DictReader((output_dir / "classified_files.csv").open(encoding="utf-8", newline="")))
+    assert rows[0]["cost_usd"] == "0.11987844"
+    assert report["long_context_requests"] == 1
+    assert report["short_context_requests"] == 0
 
 
 def test_collect_cost_pilot_prices_cache_reads_and_writes_separately(

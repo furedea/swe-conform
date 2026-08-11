@@ -74,7 +74,7 @@ def test_batch_markdown_prepare_defaults_to_a_twenty_file_luna_pilot() -> None:
     assert arguments.workers == 4
 
 
-def test_classify_markdown_prepare_defaults_to_max_reasoning_effort() -> None:
+def test_classify_markdown_prepare_uses_the_fixed_project_rule_settings() -> None:
     arguments = main._parser().parse_args(
         [
             "classify-markdown",
@@ -88,9 +88,11 @@ def test_classify_markdown_prepare_defaults_to_max_reasoning_effort() -> None:
 
     assert arguments.model == "gpt-5.6-luna"
     assert arguments.reasoning_effort == "max"
-    assert arguments.max_output_tokens == 16_000
+    assert arguments.max_output_tokens == 32_000
     assert arguments.sample_size == 20
-    assert arguments.workers == 4
+    assert arguments.workers == 16
+    assert arguments.provider == "bedrock"
+    assert arguments.bedrock_region == "us-east-1"
 
 
 def test_classify_markdown_prepare_can_select_all_filtered_files() -> None:
@@ -188,6 +190,37 @@ def test_batch_markdown_rejects_openrouter_as_a_batch_provider() -> None:
         )
 
 
+def test_classify_markdown_run_uses_the_fixed_project_rule_settings_by_default() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "classify-markdown",
+            "run",
+            "--output-dir",
+            "experiments/pilot",
+        ],
+    )
+
+    assert arguments.provider == "bedrock"
+    assert arguments.bedrock_region == "us-east-1"
+    assert arguments.workers == 16
+
+
+def test_classify_markdown_run_rejects_a_region_without_luna() -> None:
+    with pytest.raises(SystemExit):
+        main._parser().parse_args(
+            [
+                "classify-markdown",
+                "run",
+                "--output-dir",
+                "experiments/pilot",
+                "--provider",
+                "bedrock",
+                "--bedrock-region",
+                "ap-northeast-1",
+            ],
+        )
+
+
 def test_classify_markdown_run_uses_openrouter_responses_concurrently(
     mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
@@ -207,13 +240,55 @@ def test_classify_markdown_run_uses_openrouter_responses_concurrently(
             "run",
             "--output-dir",
             str(tmp_path),
+            "--provider",
+            "openrouter",
             "--workers",
             "4",
         ],
     )
 
     client.assert_called_once_with(api_key=__name__)
-    run.assert_called_once_with(output_dir=tmp_path, client=client.return_value, workers=4)
+    run.assert_called_once_with(
+        output_dir=tmp_path,
+        client=client.return_value,
+        provider="openrouter",
+        region=None,
+        workers=4,
+    )
+    client.return_value.close.assert_called_once_with()
+    assert json.loads(capsys.readouterr().out)["completed"] == 20
+
+
+def test_classify_markdown_run_uses_bedrock_responses_concurrently(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    mocker.patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": __name__})
+    client = mocker.patch("main.bedrock_responses_client.BedrockResponsesClient", autospec=True)
+    run = mocker.patch(
+        "main.markdown_responses_runner.run_prepared_classification",
+        autospec=True,
+        return_value={"requested": 20, "completed": 20, "provider_reported_cost_usd": None},
+    )
+
+    main.main(
+        [
+            "classify-markdown",
+            "run",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    client.assert_called_once_with(api_key=__name__, region="us-east-1")
+    run.assert_called_once_with(
+        output_dir=tmp_path,
+        client=client.return_value,
+        provider="bedrock",
+        region="us-east-1",
+        workers=16,
+    )
     client.return_value.close.assert_called_once_with()
     assert json.loads(capsys.readouterr().out)["completed"] == 20
 

@@ -19,6 +19,7 @@ testpaths = ["tests"]
 ignore_notebooks = true
 known_first_party = [
   "batch_runner",
+  "bedrock_responses_client",
   "cache_runner",
   "calibration",
   "codex_cli_client",
@@ -45,6 +46,7 @@ known_first_party = [
   "repository_sampling",
   "repository_tree",
   "repository_workspace",
+  "responses_provider",
   "result_store",
 ]
 
@@ -153,6 +155,7 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = [
   "batch_runner",
+  "bedrock_responses_client",
   "cache_runner",
   "calibration",
   "codex_cli_client",
@@ -173,6 +176,7 @@ known-first-party = [
   "repository",
   "repository_cache",
   "repository_workspace",
+  "responses_provider",
   "result_store",
 ]
 
