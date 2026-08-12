@@ -117,6 +117,7 @@ def test_classify_markdown_run_cache_uses_fixed_settings_and_local_paths() -> No
     assert arguments.max_output_tokens == 32_000
     assert arguments.workers == 16
     assert arguments.blob_batch_size == 64
+    assert arguments.max_input_bytes == 200_000
 
 
 def test_classify_markdown_run_cache_never_creates_a_github_client(
@@ -162,6 +163,9 @@ def test_classify_markdown_run_cache_never_creates_a_github_client(
         repository_summary_csv=repository_summary_csv,
         output_dir=output_dir,
         repository_client=local.return_value,
+        snapshot_inspector=cache.return_value,
+        skip_incomplete_repositories=False,
+        excluded_repositories=(),
         responses_client=responses.return_value,
         provider="bedrock",
         region="us-east-1",
@@ -170,6 +174,7 @@ def test_classify_markdown_run_cache_never_creates_a_github_client(
         max_output_tokens=32_000,
         workers=16,
         blob_batch_size=64,
+        max_input_bytes=200_000,
     )
     responses.return_value.close.assert_called_once_with()
 
@@ -739,6 +744,62 @@ def test_markdown_filename_audit_cache_only_never_creates_a_github_client(
     auditor.assert_called_once_with(client=local.return_value, agent_evidence={})
 
 
+def test_markdown_filename_cache_only_accepts_snapshot_safety_options() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "audit-markdown-filenames",
+            "--input-dir",
+            "experiments/input",
+            "--output-dir",
+            "experiments/output",
+            "--cache-root",
+            "/mnt/hdd/repositories",
+            "--cache-only",
+            "--skip-incomplete-repositories",
+            "--exclude-repository",
+            "revanced/revanced-patches",
+        ],
+    )
+
+    assert arguments.skip_incomplete_repositories is True
+    assert arguments.exclude_repository == ["revanced/revanced-patches"]
+
+
+def test_markdown_filename_snapshot_safety_requires_cache_only(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="--cache-only"):
+        main.main(
+            [
+                "audit-markdown-filenames",
+                "--input-dir",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "output"),
+                "--skip-incomplete-repositories",
+            ],
+        )
+
+
+def test_cache_classification_accepts_snapshot_safety_options() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "classify-markdown",
+            "run-cache",
+            "--candidate-csv",
+            "experiments/candidates.csv",
+            "--output-dir",
+            "experiments/output",
+            "--cache-root",
+            "/mnt/hdd/repositories",
+            "--skip-incomplete-repositories",
+            "--exclude-repository",
+            "revanced/revanced-patches",
+        ],
+    )
+
+    assert arguments.skip_incomplete_repositories is True
+    assert arguments.exclude_repository == ["revanced/revanced-patches"]
+
+
 def test_markdown_filename_audit_cache_only_uses_the_resumable_candidate_store(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -746,7 +807,7 @@ def test_markdown_filename_audit_cache_only_uses_the_resumable_candidate_store(
     candidates = (mocker.sentinel.candidate,)
     mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=candidates)
     mocker.patch("main.markdown_audit.load_agent_evidence", autospec=True, return_value={})
-    mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
+    cache = mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
     mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
     auditor = mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
     store = mocker.patch("main.markdown_candidate_store.MarkdownCandidateStore", autospec=True)
@@ -780,6 +841,9 @@ def test_markdown_filename_audit_cache_only_uses_the_resumable_candidate_store(
             "--cache-root",
             "/mnt/hdd/repositories",
             "--cache-only",
+            "--skip-incomplete-repositories",
+            "--exclude-repository",
+            "revanced/revanced-patches",
         ],
     )
 
@@ -792,6 +856,9 @@ def test_markdown_filename_audit_cache_only_uses_the_resumable_candidate_store(
         workers=4,
         limit=None,
         on_progress=main._log_candidate_progress,
+        snapshot_inspector=cache.return_value,
+        skip_incomplete_repositories=True,
+        excluded_repositories=("revanced/revanced-patches",),
     )
 
 

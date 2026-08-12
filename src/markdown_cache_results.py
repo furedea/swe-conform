@@ -16,7 +16,10 @@ _REPOSITORY_SUMMARY_FILENAME = "repository_classification_summary.csv"
 _SELECTED_REPOSITORIES_FILENAME = "selected_repositories.csv"
 _COST_FILENAME = "cost_summary.json"
 _RUN_FILENAME = "responses_run.json"
-_RETRYABLE_STATUSES = frozenset({"model_error", "retrieval_error"})
+_SKIPPED_REPOSITORIES_FILENAME = "skipped_repositories.csv"
+_RETRYABLE_STATUSES = frozenset({"model_error", "retrieval_error", "snapshot_incomplete"})
+_CLASSIFIED_STATUSES = frozenset({"not_found", "pass", "review"})
+_SKIPPED_STATUSES = frozenset({"explicitly_excluded", "snapshot_incomplete"})
 _CLASSIFIED_FIELDS = (
     "custom_id",
     "input_index",
@@ -55,8 +58,15 @@ _REPOSITORY_FIELDS = (
     "review_count",
     "model_error_count",
     "retrieval_error_count",
+    "input_too_large_count",
     "extraction_status",
     "error",
+)
+_SKIPPED_REPOSITORY_FIELDS = (
+    "repository",
+    "snapshot_sha",
+    "status",
+    "reason",
 )
 
 
@@ -145,6 +155,7 @@ def write_repository_reports(
     records: Sequence[Mapping[str, object]],
     *,
     output_dir: Path,
+    repository_states: Mapping[tuple[str, str], tuple[str, str] | None] | None = None,
 ) -> None:
     """Aggregate per-file classifications over every extracted repository."""
     classified: defaultdict[tuple[str, str], list[Mapping[str, object]]] = defaultdict(list)
@@ -157,15 +168,20 @@ def write_repository_reports(
             file_records = classified.get(identity, [])
             counts = Counter(str(record["status"]) for record in file_records)
             candidate_count = int(source["markdown_filename_and_content_file_count"])
+            state = (repository_states or {}).get(identity)
             rows.append(
                 {
                     "name": identity[0],
                     "lastCommitSHA": identity[1],
-                    "status": _repository_status(
-                        extraction_status=source["status"],
-                        candidate_count=candidate_count,
-                        classified_count=len(file_records),
-                        counts=counts,
+                    "status": (
+                        state[0]
+                        if state is not None
+                        else _repository_status(
+                            extraction_status=source["status"],
+                            candidate_count=candidate_count,
+                            classified_count=len(file_records),
+                            counts=counts,
+                        )
                     ),
                     "candidate_file_count": candidate_count,
                     "classified_file_count": len(file_records),
@@ -174,8 +190,9 @@ def write_repository_reports(
                     "review_count": counts["review"],
                     "model_error_count": counts["model_error"],
                     "retrieval_error_count": counts["retrieval_error"],
+                    "input_too_large_count": counts["input_too_large"],
                     "extraction_status": source["status"],
-                    "error": source["error"],
+                    "error": state[1] if state is not None else source["error"],
                 },
             )
     _write_csv(output_dir / _REPOSITORY_SUMMARY_FILENAME, rows, fieldnames=_REPOSITORY_FIELDS)
@@ -186,6 +203,30 @@ def write_repository_reports(
     )
 
 
+def write_skipped_repository_report(
+    *,
+    output_dir: Path,
+    repository_states: Mapping[tuple[str, str], tuple[str, str] | None],
+) -> None:
+    """Write every repository skipped before file classification."""
+    skipped_statuses = {"explicitly_excluded", "snapshot_incomplete"}
+    rows = [
+        {
+            "repository": repository,
+            "snapshot_sha": revision,
+            "status": state[0],
+            "reason": state[1],
+        }
+        for (repository, revision), state in repository_states.items()
+        if state is not None and state[0] in skipped_statuses
+    ]
+    _write_csv(
+        output_dir / _SKIPPED_REPOSITORIES_FILENAME,
+        rows,
+        fieldnames=_SKIPPED_REPOSITORY_FIELDS,
+    )
+
+
 def write_run_report(output_dir: Path, report: Mapping[str, object]) -> None:
     """Persist the final cumulative cost and execution reports."""
     _write_json(output_dir / _COST_FILENAME, report)
@@ -193,12 +234,14 @@ def write_run_report(output_dir: Path, report: Mapping[str, object]) -> None:
 
 
 def _cost_report(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    completed = tuple(record for record in records if record["status"] not in _RETRYABLE_STATUSES)
+    completed = tuple(record for record in records if record["status"] in _CLASSIFIED_STATUSES)
+    skipped = tuple(record for record in records if record["status"] in _SKIPPED_STATUSES)
     cost = round(sum(float(str(record["cost_usd"])) for record in records), 6)
     return {
         "sampled": len(records),
         "completed": len(completed),
-        "errors": len(records) - len(completed),
+        "errors": len(records) - len(completed) - len(skipped),
+        "skipped_files": len(skipped),
         "status_counts": dict(sorted(Counter(str(record["status"]) for record in records).items())),
         "input_tokens": sum(int(str(record["input_tokens"])) for record in records),
         "uncached_input_tokens": sum(int(str(record["uncached_input_tokens"])) for record in records),
@@ -236,7 +279,7 @@ def _repository_status(
         return "no_candidates"
     if counts["pass"]:
         return "pass"
-    if counts["review"] or counts["model_error"] or counts["retrieval_error"]:
+    if counts["review"] or counts["model_error"] or counts["retrieval_error"] or counts["input_too_large"]:
         return "review"
     if classified_count != candidate_count:
         return "review"

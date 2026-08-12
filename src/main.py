@@ -144,14 +144,7 @@ def _parser() -> argparse.ArgumentParser:
         "audit-markdown-filenames",
         help="Filter Markdown files by configured filename and content terms",
     )
-    _add_markdown_audit_arguments(filename_audit_parser)
-    filename_audit_parser.add_argument("--cache-root", type=Path)
-    filename_audit_parser.add_argument(
-        "--cache-only",
-        action="store_true",
-        help="Read every repository object from --cache-root without GitHub fallback",
-    )
-    filename_audit_parser.add_argument("--git-command", default="git")
+    _add_markdown_filename_audit_arguments(filename_audit_parser)
     _add_batch_markdown_arguments(subparsers)
     _add_classify_markdown_arguments(subparsers)
     return parser
@@ -216,6 +209,7 @@ def _add_classify_markdown_arguments(
     run_cache_parser.add_argument("--repository-summary-csv", type=Path)
     run_cache_parser.add_argument("--output-dir", type=Path, required=True)
     run_cache_parser.add_argument("--cache-root", type=Path, required=True)
+    _add_cache_classification_safety_arguments(run_cache_parser)
     run_cache_parser.add_argument("--git-command", default="git")
     run_cache_parser.add_argument(
         "--provider",
@@ -327,6 +321,43 @@ def _add_markdown_audit_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         dest="enforce_snapshot_window",
         help="Allow revision-pinned replay inputs whose last commit predates 2026-01-01",
+    )
+
+
+def _add_cache_safety_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--exclude-repository",
+        action="append",
+        default=[],
+        metavar="OWNER/REPOSITORY",
+        help="Skip one repository; repeat this option to skip multiple repositories",
+    )
+    parser.add_argument(
+        "--skip-incomplete-repositories",
+        action="store_true",
+        help="Skip snapshots whose complete reachable Git object graph is unavailable",
+    )
+
+
+def _add_markdown_filename_audit_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_markdown_audit_arguments(parser)
+    parser.add_argument("--cache-root", type=Path)
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Read every repository object from --cache-root without GitHub fallback",
+    )
+    _add_cache_safety_arguments(parser)
+    parser.add_argument("--git-command", default="git")
+
+
+def _add_cache_classification_safety_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_cache_safety_arguments(parser)
+    parser.add_argument(
+        "--max-input-bytes",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_INPUT_BYTES,
+        help="Record larger Markdown files without sending them to the model",
     )
 
 
@@ -503,12 +534,15 @@ def _audit_markdown(arguments: argparse.Namespace) -> None:
 
 
 def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
+    if not arguments.cache_only and (arguments.skip_incomplete_repositories or arguments.exclude_repository):
+        raise ValueError("cache safety options require --cache-only")
     candidates = repository.load_repository_candidates(
         arguments.input_dir,
         enforce_snapshot_window=arguments.enforce_snapshot_window,
     )
     agent_evidence = markdown_audit.load_agent_evidence(arguments.evidence_csv or ())
     github: github_client.GitHubClient | None = None
+    cache: repository_cache.GitRepositoryCache | None = None
     if arguments.cache_only:
         if arguments.cache_root is None:
             msg = "--cache-root is required when --cache-only is used"
@@ -530,6 +564,7 @@ def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
     )
     try:
         if arguments.cache_only:
+            assert cache is not None
             store = markdown_candidate_store.MarkdownCandidateStore(
                 arguments.output_dir,
                 configuration=_candidate_extraction_configuration(arguments),
@@ -542,6 +577,9 @@ def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
                 workers=arguments.workers,
                 limit=arguments.limit,
                 on_progress=_log_candidate_progress,
+                snapshot_inspector=cache,
+                skip_incomplete_repositories=arguments.skip_incomplete_repositories,
+                excluded_repositories=tuple(arguments.exclude_repository),
             )
             report = store.report()
             payload = {
@@ -550,6 +588,10 @@ def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
                 "evaluated": stats.evaluated,
                 "completed": report.stats.completed,
                 "errors": report.stats.errors,
+                "complete_repositories": stats.complete_repositories,
+                "incomplete_repositories": stats.incomplete_repositories,
+                "explicitly_excluded_repositories": stats.explicitly_excluded_repositories,
+                "processed_repositories": stats.processed_repositories,
                 "elapsed_seconds": round(stats.elapsed_seconds, 3),
                 "output_dir": str(arguments.output_dir),
             }
@@ -581,6 +623,8 @@ def _candidate_extraction_configuration(arguments: argparse.Namespace) -> dict[s
         "evidence_fingerprints": _path_fingerprints(arguments.evidence_csv or ()),
         "enforce_snapshot_window": arguments.enforce_snapshot_window,
         "filter": markdown_filename_audit.filter_configuration(),
+        "skip_incomplete_repositories": arguments.skip_incomplete_repositories,
+        "excluded_repositories": sorted(set(arguments.exclude_repository), key=str.casefold),
     }
 
 
@@ -717,6 +761,9 @@ def _classify_cached_markdown(arguments: argparse.Namespace) -> None:
             repository_summary_csv=repository_summary_csv,
             output_dir=arguments.output_dir,
             repository_client=repository_client,
+            snapshot_inspector=cache,
+            skip_incomplete_repositories=arguments.skip_incomplete_repositories,
+            excluded_repositories=tuple(arguments.exclude_repository),
             responses_client=responses_client,
             provider=arguments.provider,
             region=(
@@ -729,6 +776,7 @@ def _classify_cached_markdown(arguments: argparse.Namespace) -> None:
             max_output_tokens=arguments.max_output_tokens,
             workers=arguments.workers,
             blob_batch_size=arguments.blob_batch_size,
+            max_input_bytes=arguments.max_input_bytes,
         )
     finally:
         responses_client.close()

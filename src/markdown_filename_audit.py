@@ -80,14 +80,22 @@ _REPOSITORY_SUMMARY_FIELDS = (
     "agent_evidence_filename_and_content_match_count",
     "agent_evidence_not_evaluated_count",
 )
+_SKIPPED_REPOSITORY_FIELDS = (
+    "repository",
+    "snapshot_sha",
+    "status",
+    "reason",
+)
 
 
 class MarkdownFilenameAuditStatus(StrEnum):
     """Outcome of scanning filenames for one repository revision."""
 
     COMPLETED = "completed"
+    EXPLICITLY_EXCLUDED = "explicitly_excluded"
     RETRIEVAL_ERROR = "retrieval_error"
     SCAN_ERROR = "scan_error"
+    SNAPSHOT_INCOMPLETE = "snapshot_incomplete"
 
 
 class MarkdownTreeClient(Protocol):
@@ -342,6 +350,11 @@ def write_reports(report: MarkdownFilenameAuditReport, output_dir: Path) -> None
         _repository_summary_rows(report.results),
         fieldnames=_REPOSITORY_SUMMARY_FIELDS,
     )
+    _write_csv(
+        output_dir / "skipped_repositories.csv",
+        _skipped_repository_rows(report.results),
+        fieldnames=_SKIPPED_REPOSITORY_FIELDS,
+    )
 
 
 def _filename_file_rows(
@@ -428,6 +441,25 @@ def _repository_summary_rows(
             ),
         }
         for result in results
+    ]
+
+
+def _skipped_repository_rows(
+    results: Sequence[RepositoryMarkdownFilenameAudit],
+) -> list[dict[str, object]]:
+    skipped_statuses = {
+        MarkdownFilenameAuditStatus.EXPLICITLY_EXCLUDED,
+        MarkdownFilenameAuditStatus.SNAPSHOT_INCOMPLETE,
+    }
+    return [
+        {
+            "repository": result.candidate.repository,
+            "snapshot_sha": result.candidate.revision,
+            "status": result.status.value,
+            "reason": result.error,
+        }
+        for result in results
+        if result.status in skipped_statuses
     ]
 
 

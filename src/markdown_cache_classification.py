@@ -18,6 +18,7 @@ import markdown_batch_lifecycle
 import markdown_cache_results
 import markdown_classification
 import markdown_responses_runner
+import repository_cache
 import responses_provider
 
 _CANDIDATE_COLUMNS = frozenset(
@@ -32,6 +33,7 @@ _CANDIDATE_COLUMNS = frozenset(
         "matched_content_terms",
     },
 )
+DEFAULT_MAX_INPUT_BYTES = 200_000
 
 
 class LocalBlobClient(Protocol):
@@ -39,6 +41,14 @@ class LocalBlobClient(Protocol):
 
     def get_text_blobs(self, repository: str, blob_shas: tuple[str, ...]) -> dict[str, str]:
         """Return UTF-8-decoded blobs keyed by Git object ID."""
+        ...
+
+
+class SnapshotInspector(Protocol):
+    """Inspect one revision-pinned snapshot without network access."""
+
+    def inspect_snapshot(self, repository: str, revision: str) -> repository_cache.SnapshotInspection:
+        """Return local snapshot availability and completeness."""
         ...
 
 
@@ -74,6 +84,22 @@ class CandidateContent:
     candidate: CachedMarkdownCandidate
     content: str = ""
     error: str = ""
+    error_status: str = "retrieval_error"
+
+
+@dataclass(frozen=True, slots=True)
+class RepositorySource:
+    """One repository revision and its candidate-extraction outcome."""
+
+    repository: str
+    revision: str
+    status: str = "completed"
+    error: str = ""
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        """Return the revision-pinned repository identity."""
+        return self.repository, self.revision
 
 
 def run_cache_classification(
@@ -82,6 +108,9 @@ def run_cache_classification(
     repository_summary_csv: Path | None = None,
     output_dir: Path,
     repository_client: LocalBlobClient,
+    snapshot_inspector: SnapshotInspector | None = None,
+    skip_incomplete_repositories: bool = False,
+    excluded_repositories: Sequence[str] = (),
     responses_client: markdown_responses_runner.ResponsesClient,
     provider: str,
     region: str | None,
@@ -90,6 +119,7 @@ def run_cache_classification(
     max_output_tokens: int,
     workers: int,
     blob_batch_size: int,
+    max_input_bytes: int = DEFAULT_MAX_INPUT_BYTES,
 ) -> dict[str, object]:
     """Classify cached Markdown candidates with bounded memory and durable progress."""
     if workers < 1:
@@ -98,7 +128,10 @@ def run_cache_classification(
     if blob_batch_size < 1:
         msg = "blob_batch_size must be at least 1"
         raise ValueError(msg)
+    if max_input_bytes < 1:
+        raise ValueError("max_input_bytes must be at least 1")
     candidates = load_cached_candidates(candidate_csv)
+    sources = _repository_sources(repository_summary_csv, candidates=candidates)
     configuration = {
         "schema_version": 1,
         "candidate_csv": str(candidate_csv),
@@ -108,6 +141,7 @@ def run_cache_classification(
             _sha256_file(repository_summary_csv) if repository_summary_csv is not None else None
         ),
         "classification_contract_sha256": markdown_batch.classification_contract_sha256(),
+        "prompt_version": markdown_batch.CLASSIFICATION_PROMPT_VERSION,
         "provider": provider,
         "region": region,
         "model": model,
@@ -116,11 +150,33 @@ def run_cache_classification(
         "max_output_tokens": max_output_tokens,
         "workers": workers,
         "blob_batch_size": blob_batch_size,
+        "max_input_bytes": max_input_bytes,
+        "skip_incomplete_repositories": skip_incomplete_repositories,
+        "excluded_repositories": sorted(set(excluded_repositories), key=str.casefold),
     }
     store = markdown_cache_results.CacheClassificationStore(output_dir, configuration=configuration)
     store.initialize()
+    repository_states = _repository_states(
+        sources,
+        snapshot_inspector=snapshot_inspector,
+        skip_incomplete_repositories=skip_incomplete_repositories,
+        excluded_repositories=excluded_repositories,
+        workers=min(workers, 4),
+    )
+    previous_completed_ids = store.completed_ids()
+    for candidate in candidates:
+        state = repository_states[(candidate.repository, candidate.revision)]
+        if state is not None and (
+            state[0] != "explicitly_excluded" or candidate.custom_id not in previous_completed_ids
+        ):
+            store.append(_skipped_candidate(candidate, status=state[0], reason=state[1]))
     completed_ids = store.completed_ids()
-    pending = tuple(candidate for candidate in candidates if candidate.custom_id not in completed_ids)
+    pending = tuple(
+        candidate
+        for candidate in candidates
+        if repository_states[(candidate.repository, candidate.revision)] is None
+        if candidate.custom_id not in completed_ids
+    )
     started_at = datetime.now(UTC)
     started = time.perf_counter()
     try:
@@ -134,6 +190,7 @@ def run_cache_classification(
             max_output_tokens=max_output_tokens,
             workers=workers,
             blob_batch_size=blob_batch_size,
+            max_input_bytes=max_input_bytes,
             store=store,
         )
     finally:
@@ -143,7 +200,12 @@ def run_cache_classification(
                 repository_summary_csv,
                 store.records(),
                 output_dir=output_dir,
+                repository_states=repository_states,
             )
+        markdown_cache_results.write_skipped_repository_report(
+            output_dir=output_dir,
+            repository_states=repository_states,
+        )
     elapsed_seconds = round(time.perf_counter() - started, 6)
     report.update(
         {
@@ -155,9 +217,14 @@ def run_cache_classification(
             "max_output_tokens": max_output_tokens,
             "workers": workers,
             "blob_batch_size": blob_batch_size,
+            "max_input_bytes": max_input_bytes,
             "requested": len(candidates),
             "attempted": attempted,
-            "resumed": len(candidates) - len(pending),
+            "resumed": sum(
+                candidate.custom_id in previous_completed_ids
+                and repository_states[(candidate.repository, candidate.revision)] is None
+                for candidate in candidates
+            ),
             "started_at": started_at.isoformat(),
             "completed_at": datetime.now(UTC).isoformat(),
             "elapsed_seconds": elapsed_seconds,
@@ -165,6 +232,20 @@ def run_cache_classification(
                 sum(float(str(record["elapsed_seconds"])) for record in store.records()),
                 6,
             ),
+            "input_repositories": len(sources),
+            "complete_repositories": sum(state is None for state in repository_states.values()),
+            "incomplete_repositories": sum(
+                state is not None and state[0] == "snapshot_incomplete" for state in repository_states.values()
+            ),
+            "explicitly_excluded_repositories": sum(
+                state is not None and state[0] == "explicitly_excluded" for state in repository_states.values()
+            ),
+            "processed_repositories": sum(state is None for state in repository_states.values()),
+            "repository_errors": sum(
+                state is not None and state[0] not in {"explicitly_excluded", "snapshot_incomplete"}
+                for state in repository_states.values()
+            ),
+            "input_too_large_files": sum(record["status"] == "input_too_large" for record in store.records()),
         },
     )
     markdown_cache_results.write_run_report(output_dir, report)
@@ -174,7 +255,7 @@ def run_cache_classification(
 def load_cached_candidates(path: Path) -> tuple[CachedMarkdownCandidate, ...]:
     """Load unique revision-pinned candidates with immutable blob identities."""
     candidates: list[CachedMarkdownCandidate] = []
-    custom_ids: set[str] = set()
+    candidates_by_path: dict[tuple[str, str, str], CachedMarkdownCandidate] = {}
     with path.open(encoding="utf-8", newline="") as input_file:
         reader = csv.DictReader(input_file)
         missing = _CANDIDATE_COLUMNS.difference(reader.fieldnames or ())
@@ -193,11 +274,15 @@ def load_cached_candidates(path: Path) -> tuple[CachedMarkdownCandidate, ...]:
                 matched_filename_terms=tuple(filter(None, row["matched_filename_terms"].split("|"))),
                 matched_content_terms=tuple(filter(None, row["matched_content_terms"].split("|"))),
             )
-            if candidate.custom_id in custom_ids:
-                identity = f"{candidate.repository}@{candidate.revision}:{candidate.path}"
-                msg = f"duplicate cached Markdown candidate: {identity}"
-                raise ValueError(msg)
-            custom_ids.add(candidate.custom_id)
+            path_identity = candidate.repository, candidate.revision, candidate.path
+            existing = candidates_by_path.get(path_identity)
+            if existing is not None:
+                if candidate.blob_sha != existing.blob_sha:
+                    identity = f"{candidate.repository}@{candidate.revision}:{candidate.path}"
+                    msg = f"conflicting cached Markdown candidate: {identity}"
+                    raise ValueError(msg)
+                continue
+            candidates_by_path[path_identity] = candidate
             candidates.append(candidate)
     return tuple(candidates)
 
@@ -213,9 +298,17 @@ def _classify_pending(
     max_output_tokens: int,
     workers: int,
     blob_batch_size: int,
+    max_input_bytes: int,
     store: markdown_cache_results.CacheClassificationStore,
 ) -> int:
-    contents = iter(_candidate_contents(candidates, repository_client, blob_batch_size=blob_batch_size))
+    contents = iter(
+        _candidate_contents(
+            candidates,
+            repository_client,
+            blob_batch_size=blob_batch_size,
+            max_input_bytes=max_input_bytes,
+        ),
+    )
     attempted = 0
     first_content = _next_content(contents, store)
     if first_content is not None:
@@ -271,7 +364,7 @@ def _next_content(
 ) -> CandidateContent | None:
     for item in contents:
         if item.error:
-            store.append(_retrieval_error(item.candidate, item.error))
+            store.append(_candidate_error(item))
             continue
         return item
     return None
@@ -296,7 +389,7 @@ def _fill_futures(
         except StopIteration:
             return True
         if item.error:
-            store.append(_retrieval_error(item.candidate, item.error))
+            store.append(_candidate_error(item))
             continue
         future = executor.submit(
             _classify_candidate,
@@ -316,9 +409,17 @@ def _candidate_contents(
     client: LocalBlobClient,
     *,
     blob_batch_size: int,
+    max_input_bytes: int,
 ) -> Iterator[CandidateContent]:
     grouped: defaultdict[str, list[CachedMarkdownCandidate]] = defaultdict(list)
     for candidate in candidates:
+        if candidate.size_bytes > max_input_bytes:
+            yield CandidateContent(
+                candidate=candidate,
+                error=f"input_too_large: size_bytes={candidate.size_bytes} max_input_bytes={max_input_bytes}",
+                error_status="input_too_large",
+            )
+            continue
         grouped[candidate.repository].append(candidate)
     for repository, repository_candidates in grouped.items():
         for start in range(0, len(repository_candidates), blob_batch_size):
@@ -335,6 +436,14 @@ def _candidate_contents(
                     yield CandidateContent(
                         candidate=candidate,
                         error=f"CachedRepositoryTreeError: cached blob is absent: {candidate.blob_sha}",
+                    )
+                    continue
+                content_size = len(content.encode())
+                if content_size > max_input_bytes:
+                    yield CandidateContent(
+                        candidate=candidate,
+                        error=f"input_too_large: size_bytes={content_size} max_input_bytes={max_input_bytes}",
+                        error_status="input_too_large",
                     )
                     continue
                 yield CandidateContent(candidate=candidate, content=content)
@@ -413,6 +522,107 @@ def _retrieval_error(candidate: CachedMarkdownCandidate, reason: str) -> dict[st
         "elapsed_seconds": 0.0,
         "provider_result": "",
     }
+
+
+def _candidate_error(item: CandidateContent) -> dict[str, object]:
+    record = _retrieval_error(item.candidate, item.error)
+    record["status"] = item.error_status
+    return record
+
+
+def _repository_states(
+    sources: Sequence[RepositorySource],
+    *,
+    snapshot_inspector: SnapshotInspector | None,
+    skip_incomplete_repositories: bool,
+    excluded_repositories: Sequence[str],
+    workers: int,
+) -> dict[tuple[str, str], tuple[str, str] | None]:
+    normalized_exclusions = {name.casefold() for name in excluded_repositories}
+    states: dict[tuple[str, str], tuple[str, str] | None] = {}
+    inspections: list[RepositorySource] = []
+    for source in sources:
+        repository, revision = source.identity
+        if repository.casefold() in normalized_exclusions:
+            states[(repository, revision)] = "explicitly_excluded", "explicitly_excluded"
+            continue
+        if source.status != "completed":
+            states[(repository, revision)] = source.status, source.error
+            continue
+        if not skip_incomplete_repositories:
+            states[(repository, revision)] = None
+            continue
+        if snapshot_inspector is None:
+            raise ValueError("snapshot_inspector is required when incomplete repositories are skipped")
+        inspections.append(source)
+    if snapshot_inspector is None:
+        return states
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(snapshot_inspector.inspect_snapshot, source.repository, source.revision): source
+            for source in inspections
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                inspection = future.result()
+                reason = inspection.state.value
+                if inspection.detail:
+                    reason = f"{reason}: {inspection.detail}"
+                state = None if inspection.complete else ("snapshot_incomplete", reason)
+            except Exception as error:
+                reason = f"{type(error).__name__}: {error}"[:1000]
+                state = "snapshot_incomplete", reason
+            states[source.identity] = state
+    return states
+
+
+def _repository_sources(
+    repository_summary_csv: Path | None,
+    *,
+    candidates: Sequence[CachedMarkdownCandidate],
+) -> tuple[RepositorySource, ...]:
+    candidate_identities = tuple(dict.fromkeys((candidate.repository, candidate.revision) for candidate in candidates))
+    if repository_summary_csv is None:
+        return tuple(RepositorySource(repository, revision) for repository, revision in candidate_identities)
+    required_columns = frozenset({"name", "lastCommitSHA", "status", "error"})
+    sources: list[RepositorySource] = []
+    identities: set[tuple[str, str]] = set()
+    with repository_summary_csv.open(encoding="utf-8", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        missing = required_columns.difference(reader.fieldnames or ())
+        if missing:
+            msg = f"{repository_summary_csv} is missing required columns: {', '.join(sorted(missing))}"
+            raise ValueError(msg)
+        for row in reader:
+            source = RepositorySource(
+                repository=row["name"].strip(),
+                revision=row["lastCommitSHA"].strip(),
+                status=row["status"].strip(),
+                error=row["error"].strip(),
+            )
+            if source.identity in identities:
+                msg = f"duplicate repository summary identity: {source.repository}@{source.revision}"
+                raise ValueError(msg)
+            identities.add(source.identity)
+            sources.append(source)
+    absent = set(candidate_identities).difference(identities)
+    if absent:
+        repository, revision = sorted(absent)[0]
+        msg = f"candidate repository is absent from repository summary: {repository}@{revision}"
+        raise ValueError(msg)
+    return tuple(sources)
+
+
+def _skipped_candidate(
+    candidate: CachedMarkdownCandidate,
+    *,
+    status: str,
+    reason: str,
+) -> dict[str, object]:
+    record = _retrieval_error(candidate, reason)
+    record["status"] = status
+    return record
 
 
 def _candidate_fields(candidate: CachedMarkdownCandidate) -> dict[str, object]:

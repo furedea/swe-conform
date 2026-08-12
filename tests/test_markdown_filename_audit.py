@@ -463,3 +463,46 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
     assert summary_rows[0]["markdown_filename_file_count"] == "2"
     assert summary_rows[0]["markdown_filename_and_content_file_count"] == "1"
     assert not (tmp_path / "markdown_term_files.csv").exists()
+
+
+def test_write_reports_lists_skipped_repositories_and_reasons(tmp_path: Path) -> None:
+    results = (
+        markdown_filename_audit.RepositoryMarkdownFilenameAudit(
+            candidate=_indexed_candidate(0),
+            status=markdown_filename_audit.MarkdownFilenameAuditStatus.SNAPSHOT_INCOMPLETE,
+            error="snapshot_incomplete",
+        ),
+        markdown_filename_audit.RepositoryMarkdownFilenameAudit(
+            candidate=_indexed_candidate(1),
+            status=markdown_filename_audit.MarkdownFilenameAuditStatus.EXPLICITLY_EXCLUDED,
+            error="explicitly_excluded",
+        ),
+    )
+    report = markdown_filename_audit.MarkdownFilenameAuditReport(
+        results=results,
+        stats=markdown_filename_audit.MarkdownFilenameAuditStats(
+            requested=2,
+            completed=0,
+            errors=2,
+            elapsed_seconds=0.0,
+        ),
+    )
+
+    markdown_filename_audit.write_reports(report, tmp_path)
+
+    with (tmp_path / "skipped_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        rows = list(csv.DictReader(input_file))
+    assert rows == [
+        {
+            "repository": "example/project-0",
+            "snapshot_sha": f"{1:040x}",
+            "status": "snapshot_incomplete",
+            "reason": "snapshot_incomplete",
+        },
+        {
+            "repository": "example/project-1",
+            "snapshot_sha": f"{2:040x}",
+            "status": "explicitly_excluded",
+            "reason": "explicitly_excluded",
+        },
+    ]

@@ -40,8 +40,11 @@ class MarkdownCandidateStore:
 
     def completed_repositories(self) -> set[tuple[str, str]]:
         """Return repository revisions whose candidate extraction completed successfully."""
-        completed = markdown_filename_audit.MarkdownFilenameAuditStatus.COMPLETED.value
-        return {identity for identity, record in self._records.items() if record["status"] == completed}
+        terminal_statuses = {
+            markdown_filename_audit.MarkdownFilenameAuditStatus.COMPLETED.value,
+            markdown_filename_audit.MarkdownFilenameAuditStatus.EXPLICITLY_EXCLUDED.value,
+        }
+        return {identity for identity, record in self._records.items() if record["status"] in terminal_statuses}
 
     def report(self) -> markdown_filename_audit.MarkdownFilenameAuditReport:
         """Return all latest checkpoint records in original input order."""

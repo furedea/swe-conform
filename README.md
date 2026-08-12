@@ -96,6 +96,47 @@ The same two commands accept `--limit 20` for a cache-backed pilot. Re-running
 failed repositories. Per-repository acquisition results are written to
 `output/repository-cache/fetch_results.jsonl` by default.
 
+## HDD-backed Markdown classification
+
+The production per-file pipeline first applies the mechanical Markdown filename
+and content filters directly to the pinned bare repositories:
+
+```bash
+uv run --frozen python src/main.py audit-markdown-filenames \
+  --input-dir docs/repository-candidates \
+  --output-dir output/markdown-candidates \
+  --cache-root /mnt/hdd/swe-conform-repositories \
+  --cache-only \
+  --skip-incomplete-repositories \
+  --exclude-repository revanced/revanced-patches \
+  --workers 16
+```
+
+It then reads each selected blob from the same pinned snapshot and submits one
+file per model request:
+
+```bash
+uv run --frozen --env-file .env python src/main.py classify-markdown run-cache \
+  --candidate-csv output/markdown-candidates/markdown_filename_files.csv \
+  --repository-summary-csv output/markdown-candidates/repository_filename_summary.csv \
+  --output-dir output/markdown-classification \
+  --cache-root /mnt/hdd/swe-conform-repositories \
+  --skip-incomplete-repositories \
+  --exclude-repository revanced/revanced-patches \
+  --provider bedrock \
+  --bedrock-region us-east-1 \
+  --workers 16
+```
+
+Both stages verify every Git object reachable from `lastCommitSHA` before
+processing a repository. They never fall back to GitHub. Incomplete and
+explicitly excluded repositories are recorded in `skipped_repositories.csv`.
+Classification records Markdown files larger than `--max-input-bytes` as
+`input_too_large` and leaves their repository in `review`; it neither truncates
+nor submits those files. Reusing an output directory is allowed only when the
+candidate inputs, prompt, schema, model settings, size limit, and cache-safety
+options are unchanged.
+
 The default execution uses four workers, `gpt-5.6-luna`, and `max` reasoning
 effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit
 experimental configuration. Each worker evaluates one repository with an
