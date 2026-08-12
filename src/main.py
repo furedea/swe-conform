@@ -16,6 +16,8 @@ import cache_runner
 import codex_cli_client
 import github_client
 import guideline_classifier
+import guideline_collection
+import guideline_collection_reports
 import markdown_audit
 import markdown_batch
 import markdown_cache_classification
@@ -63,6 +65,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         _filter(arguments)
     elif arguments.command == "sample-repositories":
         _sample_repositories(arguments)
+    elif arguments.command == "collect-guideline-repositories":
+        _collect_guideline_repositories(arguments)
     elif arguments.command == "audit-markdown":
         _audit_markdown(arguments)
     elif arguments.command == "audit-markdown-filenames":
@@ -134,6 +138,8 @@ def _parser() -> argparse.ArgumentParser:
     sample_parser.add_argument("--sample-seed", type=int, default=_DEFAULT_REPOSITORY_SAMPLE_SEED)
     sample_parser.add_argument("--exclude-csv", type=Path, action="append")
 
+    _add_guideline_collection_arguments(subparsers)
+
     audit_parser = subparsers.add_parser(
         "audit-markdown",
         help="List Markdown files containing configured terms and compare agent evidence",
@@ -148,6 +154,72 @@ def _parser() -> argparse.ArgumentParser:
     _add_batch_markdown_arguments(subparsers)
     _add_classify_markdown_arguments(subparsers)
     return parser
+
+
+def _add_guideline_collection_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    settings = markdown_batch.PROJECT_RULE_CLASSIFICATION_SETTINGS
+    parser = subparsers.add_parser(
+        "collect-guideline-repositories",
+        help="Collect a target number of repositories through stratified per-file classification",
+    )
+    parser.add_argument("--input-dir", type=Path, default=_DEFAULT_INPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--cache-root", type=Path, required=True)
+    parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
+    parser.add_argument("--exclude-csv", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--human-checklist",
+        type=Path,
+        help="Resume after manual review and replace repositories whose positive files were all rejected",
+    )
+    parser.add_argument("--exclude-repository", action="append", default=[])
+    parser.add_argument("--target-total-repositories", type=_positive_integer, default=120)
+    parser.add_argument("--sample-seed", type=int, default=_DEFAULT_REPOSITORY_SAMPLE_SEED)
+    parser.add_argument("--repository-workers", type=_positive_integer, default=4)
+    parser.add_argument("--file-workers", type=_positive_integer, default=4)
+    parser.add_argument("--max-repository-attempts", type=_positive_integer, default=3)
+    parser.add_argument(
+        "--max-model-attempts",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_MODEL_ATTEMPTS,
+    )
+    parser.add_argument(
+        "--max-retrieval-attempts",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_RETRIEVAL_ATTEMPTS,
+    )
+    parser.add_argument("--blob-batch-size", type=_positive_integer, default=64)
+    parser.add_argument(
+        "--max-input-bytes",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_INPUT_BYTES,
+    )
+    parser.add_argument("--git-command", default="git")
+    parser.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
+        default=settings.provider.value,
+    )
+    parser.add_argument(
+        "--bedrock-region",
+        choices=responses_provider.BEDROCK_LUNA_REGIONS,
+        default=settings.region,
+    )
+    parser.add_argument("--model", default=settings.model)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=settings.reasoning_effort,
+    )
+    parser.add_argument("--max-output-tokens", type=_positive_integer, default=settings.max_output_tokens)
+    parser.add_argument(
+        "--allow-out-of-window-snapshots",
+        action="store_false",
+        dest="enforce_snapshot_window",
+        help="Allow revision-pinned replay inputs whose last commit predates 2026-01-01",
+    )
 
 
 def _add_batch_markdown_arguments(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -201,39 +273,7 @@ def _add_classify_markdown_arguments(
         default=settings.region,
     )
     run_parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
-    run_cache_parser = actions.add_parser(
-        "run-cache",
-        help="Classify candidates directly from revision-pinned bare Git caches",
-    )
-    run_cache_parser.add_argument("--candidate-csv", type=Path, required=True)
-    run_cache_parser.add_argument("--repository-summary-csv", type=Path)
-    run_cache_parser.add_argument("--output-dir", type=Path, required=True)
-    run_cache_parser.add_argument("--cache-root", type=Path, required=True)
-    _add_cache_classification_safety_arguments(run_cache_parser)
-    run_cache_parser.add_argument("--git-command", default="git")
-    run_cache_parser.add_argument(
-        "--provider",
-        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
-        default=settings.provider.value,
-    )
-    run_cache_parser.add_argument(
-        "--bedrock-region",
-        choices=responses_provider.BEDROCK_LUNA_REGIONS,
-        default=settings.region,
-    )
-    run_cache_parser.add_argument("--model", default=settings.model)
-    run_cache_parser.add_argument(
-        "--reasoning-effort",
-        choices=("low", "medium", "high", "xhigh", "max"),
-        default=settings.reasoning_effort,
-    )
-    run_cache_parser.add_argument(
-        "--max-output-tokens",
-        type=_positive_integer,
-        default=settings.max_output_tokens,
-    )
-    run_cache_parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
-    run_cache_parser.add_argument("--blob-batch-size", type=_positive_integer, default=64)
+    _add_run_cache_arguments(actions, settings=settings)
     export_parser = actions.add_parser(
         "export-pass",
         help="Materialize pass- and review-classified files for manual review",
@@ -283,6 +323,52 @@ def _add_classify_markdown_arguments(
         default=int(markdown_full_review.DEFAULT_TIMEOUT_SECONDS),
     )
     codex_review_parser.add_argument("--max-batches", type=_positive_integer)
+
+
+def _add_run_cache_arguments(
+    actions: argparse._SubParsersAction[argparse.ArgumentParser],
+    *,
+    settings: markdown_batch.ClassificationSettings,
+) -> None:
+    parser = actions.add_parser(
+        "run-cache",
+        help="Classify candidates directly from revision-pinned bare Git caches",
+    )
+    parser.add_argument("--candidate-csv", type=Path, required=True)
+    parser.add_argument("--repository-summary-csv", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--cache-root", type=Path, required=True)
+    _add_cache_classification_safety_arguments(parser)
+    parser.add_argument("--git-command", default="git")
+    parser.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
+        default=settings.provider.value,
+    )
+    parser.add_argument(
+        "--bedrock-region",
+        choices=responses_provider.BEDROCK_LUNA_REGIONS,
+        default=settings.region,
+    )
+    parser.add_argument("--model", default=settings.model)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=settings.reasoning_effort,
+    )
+    parser.add_argument("--max-output-tokens", type=_positive_integer, default=settings.max_output_tokens)
+    parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
+    parser.add_argument("--blob-batch-size", type=_positive_integer, default=64)
+    parser.add_argument(
+        "--max-model-attempts",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_MODEL_ATTEMPTS,
+    )
+    parser.add_argument(
+        "--max-retrieval-attempts",
+        type=_positive_integer,
+        default=markdown_cache_classification.DEFAULT_MAX_RETRIEVAL_ATTEMPTS,
+    )
 
 
 def _add_markdown_preparation_arguments(
@@ -502,6 +588,136 @@ def _sample_repositories(arguments: argparse.Namespace) -> None:
         "language_populations": report.language_populations,
         "language_sample_sizes": report.language_sample_sizes,
         "output_dir": str(report.output_dir),
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
+    candidates = repository.load_repository_candidates(
+        arguments.input_dir,
+        enforce_snapshot_window=arguments.enforce_snapshot_window,
+    )
+    baseline_checklists = tuple(arguments.baseline_checklist)
+    exclude_csvs = tuple(arguments.exclude_csv)
+    baseline_repositories = guideline_collection.load_baseline_repositories(baseline_checklists)
+    manual_review = guideline_collection.load_manual_review_state(arguments.human_checklist)
+    excluded_repositories = repository_sampling.load_excluded_repositories(exclude_csvs)
+    excluded_repositories.update(arguments.exclude_repository)
+    guideline_collection.validate_baseline_exclusions(
+        baseline_repositories,
+        excluded_repositories=excluded_repositories,
+    )
+    schedule = repository_sampling.stratified_schedule(
+        candidates,
+        sample_seed=arguments.sample_seed,
+        excluded_repositories=excluded_repositories,
+    )
+    configuration = {
+        "schema_version": 1,
+        "sampling_method": "stratified_random_round_robin_until_target",
+        "sampling_unit": "repository",
+        "sample_seed": arguments.sample_seed,
+        "languages": list(repository_sampling.DEFAULT_LANGUAGES),
+        "target_total_repositories": arguments.target_total_repositories,
+        "baseline_repositories": sorted(baseline_repositories, key=str.casefold),
+        "excluded_repositories": sorted(excluded_repositories, key=str.casefold),
+        "input_fingerprints": _input_fingerprints(arguments.input_dir),
+        "baseline_checklist_fingerprints": _path_fingerprints(baseline_checklists),
+        "exclude_csv_fingerprints": _path_fingerprints(exclude_csvs),
+        "classification_contract_sha256": markdown_batch.classification_contract_sha256(),
+        "filter": markdown_filename_audit.filter_configuration(),
+        "provider": arguments.provider,
+        "region": (
+            arguments.bedrock_region
+            if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value
+            else None
+        ),
+        "model": arguments.model,
+        "reasoning_effort": arguments.reasoning_effort,
+        "max_output_tokens": arguments.max_output_tokens,
+        "repository_workers": arguments.repository_workers,
+        "file_workers": arguments.file_workers,
+        "max_repository_attempts": arguments.max_repository_attempts,
+        "max_model_attempts": arguments.max_model_attempts,
+        "max_retrieval_attempts": arguments.max_retrieval_attempts,
+        "max_input_bytes": arguments.max_input_bytes,
+        "blob_batch_size": arguments.blob_batch_size,
+        "cache_root": str(arguments.cache_root),
+        "git_command": arguments.git_command,
+        "enforce_snapshot_window": arguments.enforce_snapshot_window,
+    }
+    store = guideline_collection.RepositoryCollectionStore(arguments.output_dir, configuration=configuration)
+    store.initialize()
+    guideline_collection.validate_manual_review_state(manual_review, store=store)
+    repository_sampling.write_stratified_schedule(arguments.output_dir / "sampling_manifest.csv", schedule)
+    cache = repository_cache.GitRepositoryCache(root=arguments.cache_root, command=arguments.git_command)
+    repository_client = repository_tree.LocalRepositoryTreeClient(cache=cache, command=arguments.git_command)
+    auditor = markdown_filename_audit.MarkdownFilenameAuditor(client=repository_client, agent_evidence={})
+    responses_client = _collection_classification_client(arguments)
+    processor = guideline_collection.CachedRepositoryProcessor(
+        output_dir=arguments.output_dir,
+        auditor=auditor,
+        repository_client=repository_client,
+        snapshot_inspector=cache,
+        responses_client=responses_client,
+        provider=arguments.provider,
+        region=(
+            arguments.bedrock_region
+            if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value
+            else None
+        ),
+        model=arguments.model,
+        reasoning_effort=arguments.reasoning_effort,
+        max_output_tokens=arguments.max_output_tokens,
+        file_workers=arguments.file_workers,
+        blob_batch_size=arguments.blob_batch_size,
+        max_input_bytes=arguments.max_input_bytes,
+        max_model_attempts=arguments.max_model_attempts,
+        max_retrieval_attempts=arguments.max_retrieval_attempts,
+        candidate_configuration={
+            "schema_version": 1,
+            "filter": markdown_filename_audit.filter_configuration(),
+            "cache_only": True,
+            "skip_incomplete_repositories": True,
+        },
+    )
+    try:
+        report = guideline_collection.collect_repositories(
+            schedule,
+            baseline_repository_count=len(baseline_repositories),
+            target_total_repositories=arguments.target_total_repositories,
+            confirmed_repositories=manual_review.confirmed_repositories,
+            rejected_repositories=manual_review.rejected_repositories,
+            store=store,
+            processor=processor,
+            workers=arguments.repository_workers,
+            max_repository_attempts=arguments.max_repository_attempts,
+        )
+    finally:
+        guideline_collection_reports.write_collection_reports(
+            output_dir=arguments.output_dir,
+            population=candidates,
+            store=store,
+            baseline_repositories=baseline_repositories,
+            target_total_repositories=arguments.target_total_repositories,
+            repository_client=repository_client,
+            confirmed_repositories=manual_review.confirmed_repositories,
+            rejected_repositories=manual_review.rejected_repositories,
+        )
+        responses_client.close()
+    payload = {
+        "baseline_repositories": report.baseline_repositories,
+        "excluded_repositories": len(excluded_repositories),
+        "new_repository_target": report.new_repository_target,
+        "confirmed_new_repositories": report.confirmed_new_repositories,
+        "pending_new_repositories": report.pending_new_repositories,
+        "rejected_new_repositories": len(manual_review.rejected_repositories),
+        "selected_new_repositories": report.selected_new_repositories,
+        "selected_total_repositories": report.baseline_repositories + report.selected_new_repositories,
+        "processed_repositories": report.processed_repositories,
+        "target_reached": report.target_reached,
+        "human_target_reached": report.human_target_reached,
+        "output_dir": str(arguments.output_dir),
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
@@ -777,6 +993,8 @@ def _classify_cached_markdown(arguments: argparse.Namespace) -> None:
             workers=arguments.workers,
             blob_batch_size=arguments.blob_batch_size,
             max_input_bytes=arguments.max_input_bytes,
+            max_model_attempts=arguments.max_model_attempts,
+            max_retrieval_attempts=arguments.max_retrieval_attempts,
         )
     finally:
         responses_client.close()
@@ -792,6 +1010,21 @@ def _classification_client(
             region=arguments.bedrock_region,
         )
     return openrouter_responses_client.OpenRouterResponsesClient(api_key=openrouter_credential())
+
+
+def _collection_classification_client(
+    arguments: argparse.Namespace,
+) -> bedrock_responses_client.BedrockResponsesClient | openrouter_responses_client.OpenRouterResponsesClient:
+    if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value:
+        return bedrock_responses_client.BedrockResponsesClient(
+            api_key=bedrock_credential(),
+            region=arguments.bedrock_region,
+            max_attempts=1,
+        )
+    return openrouter_responses_client.OpenRouterResponsesClient(
+        api_key=openrouter_credential(),
+        max_attempts=1,
+    )
 
 
 def _build_full_codex_checklist(arguments: argparse.Namespace) -> None:

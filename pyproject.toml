@@ -27,6 +27,8 @@ known_first_party = [
   "github_client",
   "guideline",
   "guideline_classifier",
+  "guideline_collection",
+  "guideline_collection_reports",
   "guideline_evidence",
   "main",
   "markdown_audit",

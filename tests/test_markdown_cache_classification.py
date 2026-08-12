@@ -119,6 +119,57 @@ def test_cache_classification_reports_pass_empty_and_failed_repositories(
     assert report["repository_errors"] == 1
 
 
+def test_cache_classification_selects_a_repository_with_only_a_review_file(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "markdown_filename_files.csv"
+    repository_summary_csv = tmp_path / "repository_filename_summary.csv"
+    output_dir = tmp_path / "classification"
+    _write_candidate_csv(candidate_csv)
+    _write_repository_summary(repository_summary_csv)
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"a" * 40: "Use ProjectNode in src/nodes/.\n"}
+    responses_client = mocker.Mock()
+    value = {
+        "label": "YES",
+        "reason": "The file requires ProjectNode in src/nodes/.",
+        "quote": "",
+        "confidence": 9,
+    }
+    responses_client.complete_json.return_value = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
+        document=_response_document(value),
+    )
+
+    markdown_cache_classification.run_cache_classification(
+        candidate_csv=candidate_csv,
+        repository_summary_csv=repository_summary_csv,
+        output_dir=output_dir,
+        repository_client=repository_client,
+        responses_client=responses_client,
+        provider="bedrock",
+        region="us-east-1",
+        model="gpt-5.6-luna",
+        reasoning_effort="max",
+        max_output_tokens=32_000,
+        workers=2,
+        blob_batch_size=64,
+    )
+
+    with (output_dir / "repository_classification_summary.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as input_file:
+        rows = list(csv.DictReader(input_file))
+    assert rows[0]["status"] == "pass"
+    assert rows[0]["review_count"] == "1"
+    with (output_dir / "selected_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        selected = list(csv.DictReader(input_file))
+    assert [row["name"] for row in selected] == ["example/project"]
+
+
 def test_cache_classification_inspects_repositories_without_candidate_files(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -241,6 +292,43 @@ def test_cache_classification_reuses_successes_and_retries_only_model_errors(
     assert second_report["errors"] == 0
 
 
+def test_cache_classification_stops_retrying_a_file_after_three_model_errors(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "markdown_filename_files.csv"
+    output_dir = tmp_path / "classification"
+    _write_candidate_csv(candidate_csv)
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"a" * 40: "No project rule.\n"}
+
+    attempted = []
+    for _ in range(4):
+        responses_client = mocker.Mock()
+        responses_client.complete_json.side_effect = TimeoutError("request timed out")
+        report = markdown_cache_classification.run_cache_classification(
+            candidate_csv=candidate_csv,
+            output_dir=output_dir,
+            repository_client=repository_client,
+            responses_client=responses_client,
+            provider="bedrock",
+            region="us-east-1",
+            model="gpt-5.6-luna",
+            reasoning_effort="max",
+            max_output_tokens=32_000,
+            workers=1,
+            blob_batch_size=64,
+        )
+        attempted.append(report["attempted"])
+
+    assert attempted == [1, 1, 1, 0]
+    with (output_dir / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        row = next(csv.DictReader(input_file))
+    assert row["status"] == "model_error"
+    assert row["model_attempt_count"] == "3"
+    assert row["retry_exhausted"] == "True"
+
+
 def test_cache_classification_records_missing_blobs_without_calling_the_model(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -272,6 +360,42 @@ def test_cache_classification_records_missing_blobs_without_calling_the_model(
     assert rows[0]["status"] == "retrieval_error"
     assert report["attempted"] == 0
     assert report["errors"] == 1
+
+
+def test_cache_classification_stops_retrying_a_file_after_two_retrieval_errors(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "markdown_filename_files.csv"
+    output_dir = tmp_path / "classification"
+    _write_candidate_csv(candidate_csv)
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.side_effect = RuntimeError("temporary local read failure")
+    responses_client = mocker.Mock()
+
+    attempted = []
+    for _ in range(3):
+        report = markdown_cache_classification.run_cache_classification(
+            candidate_csv=candidate_csv,
+            output_dir=output_dir,
+            repository_client=repository_client,
+            responses_client=responses_client,
+            provider="bedrock",
+            region="us-east-1",
+            model="gpt-5.6-luna",
+            reasoning_effort="max",
+            max_output_tokens=32_000,
+            workers=1,
+            blob_batch_size=64,
+        )
+        attempted.append(report["attempted"])
+
+    assert attempted == [0, 0, 0]
+    assert repository_client.get_text_blobs.call_count == 2
+    with (output_dir / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        row = next(csv.DictReader(input_file))
+    assert row["retrieval_attempt_count"] == "2"
+    assert row["retry_exhausted"] == "True"
 
 
 def test_cache_classification_skips_incomplete_snapshots_before_blob_reads(
@@ -462,7 +586,7 @@ def test_cache_classification_records_oversized_markdown_without_model_execution
     assert report["input_too_large_files"] == 1
 
 
-def test_oversized_markdown_keeps_the_repository_in_review(
+def test_oversized_markdown_keeps_the_repository_unresolved(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -495,7 +619,7 @@ def test_oversized_markdown_keeps_the_repository_in_review(
         newline="",
     ) as input_file:
         rows = list(csv.DictReader(input_file))
-    assert rows[0]["status"] == "review"
+    assert rows[0]["status"] == "unresolved"
     assert rows[0]["input_too_large_count"] == "1"
 
 

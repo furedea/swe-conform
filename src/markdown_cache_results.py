@@ -19,6 +19,7 @@ _RUN_FILENAME = "responses_run.json"
 _SKIPPED_REPOSITORIES_FILENAME = "skipped_repositories.csv"
 _RETRYABLE_STATUSES = frozenset({"model_error", "retrieval_error", "snapshot_incomplete"})
 _CLASSIFIED_STATUSES = frozenset({"not_found", "pass", "review"})
+_MODEL_ATTEMPT_STATUSES = _CLASSIFIED_STATUSES | {"model_error"}
 _SKIPPED_STATUSES = frozenset({"explicitly_excluded", "snapshot_incomplete"})
 _CLASSIFIED_FIELDS = (
     "custom_id",
@@ -37,6 +38,10 @@ _CLASSIFIED_FIELDS = (
     "quote",
     "confidence",
     "reason",
+    "attempt_count",
+    "model_attempt_count",
+    "retrieval_attempt_count",
+    "retry_exhausted",
     "input_tokens",
     "uncached_input_tokens",
     "cached_input_tokens",
@@ -70,14 +75,38 @@ _SKIPPED_REPOSITORY_FIELDS = (
 )
 
 
+def classified_fields() -> tuple[str, ...]:
+    """Return the stable per-file classification report columns."""
+    return _CLASSIFIED_FIELDS
+
+
 class CacheClassificationStore:
     """Persist final per-file classifications in an append-only checkpoint."""
 
-    __slots__ = ("_configuration", "_output_dir", "_records")
+    __slots__ = (
+        "_configuration",
+        "_max_model_attempts",
+        "_max_retrieval_attempts",
+        "_output_dir",
+        "_records",
+    )
 
-    def __init__(self, output_dir: Path, *, configuration: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        configuration: Mapping[str, object],
+        max_model_attempts: int = 3,
+        max_retrieval_attempts: int = 2,
+    ) -> None:
+        if max_model_attempts < 1:
+            raise ValueError("max_model_attempts must be at least 1")
+        if max_retrieval_attempts < 1:
+            raise ValueError("max_retrieval_attempts must be at least 1")
         self._output_dir = output_dir
         self._configuration = dict(configuration)
+        self._max_model_attempts = max_model_attempts
+        self._max_retrieval_attempts = max_retrieval_attempts
         self._records: dict[str, dict[str, object]] = {}
 
     def initialize(self) -> None:
@@ -88,18 +117,21 @@ class CacheClassificationStore:
 
     def append(self, record: Mapping[str, object]) -> None:
         """Durably append one candidate result and retain it as the latest result."""
-        document = dict(record)
+        custom_id = str(record["custom_id"])
+        document = self._attempt_record(record, previous=self._records.get(custom_id))
         checkpoint_path = self._output_dir / _CHECKPOINT_FILENAME
         with checkpoint_path.open("a", encoding="utf-8") as checkpoint:
             checkpoint.write(json.dumps(document, ensure_ascii=True, sort_keys=True))
             checkpoint.write("\n")
             checkpoint.flush()
-        self._records[str(document["custom_id"])] = document
+        self._records[custom_id] = document
 
     def completed_ids(self) -> set[str]:
         """Return file IDs whose classifications need no retry."""
         return {
-            custom_id for custom_id, record in self._records.items() if record["status"] not in _RETRYABLE_STATUSES
+            custom_id
+            for custom_id, record in self._records.items()
+            if record["status"] not in _RETRYABLE_STATUSES or bool(record["retry_exhausted"])
         }
 
     def records(self) -> tuple[dict[str, object], ...]:
@@ -146,8 +178,31 @@ class CacheClassificationStore:
                 if line_number == len(lines):
                     break
                 raise
-            records[str(record["custom_id"])] = record
+            custom_id = str(record["custom_id"])
+            records[custom_id] = self._attempt_record(record, previous=records.get(custom_id))
         return records
+
+    def _attempt_record(
+        self,
+        record: Mapping[str, object],
+        *,
+        previous: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        document = dict(record)
+        previous_attempts = int(str((previous or {}).get("attempt_count", 0)))
+        previous_model_attempts = int(str((previous or {}).get("model_attempt_count", 0)))
+        previous_retrieval_attempts = int(str((previous or {}).get("retrieval_attempt_count", 0)))
+        status = str(document["status"])
+        document["attempt_count"] = previous_attempts + 1
+        document["model_attempt_count"] = previous_model_attempts + (status in _MODEL_ATTEMPT_STATUSES)
+        document["retrieval_attempt_count"] = previous_retrieval_attempts + (status == "retrieval_error")
+        document["retry_exhausted"] = (
+            status == "model_error" and int(str(document["model_attempt_count"])) >= self._max_model_attempts
+        ) or (
+            status == "retrieval_error"
+            and int(str(document["retrieval_attempt_count"])) >= self._max_retrieval_attempts
+        )
+        return document
 
 
 def write_repository_reports(
@@ -277,12 +332,12 @@ def _repository_status(
         return extraction_status
     if candidate_count == 0:
         return "no_candidates"
-    if counts["pass"]:
+    if counts["pass"] or counts["review"]:
         return "pass"
-    if counts["review"] or counts["model_error"] or counts["retrieval_error"] or counts["input_too_large"]:
-        return "review"
+    if counts["model_error"] or counts["retrieval_error"] or counts["input_too_large"]:
+        return "unresolved"
     if classified_count != candidate_count:
-        return "review"
+        return "unresolved"
     return "not_found"
 
 

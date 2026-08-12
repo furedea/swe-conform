@@ -118,6 +118,114 @@ def test_classify_markdown_run_cache_uses_fixed_settings_and_local_paths() -> No
     assert arguments.workers == 16
     assert arguments.blob_batch_size == 64
     assert arguments.max_input_bytes == 200_000
+    assert arguments.max_model_attempts == 3
+    assert arguments.max_retrieval_attempts == 2
+
+
+def test_collect_guideline_repositories_uses_the_fixed_collection_defaults() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--input-dir",
+            "docs/repository-candidates",
+            "--output-dir",
+            "output/guideline-collection",
+            "--cache-root",
+            "/hdd/shigyo/swe-conform-repositories",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--baseline-checklist",
+            "experiments/20/checklist2_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+            "--exclude-csv",
+            "experiments/20/input/candidates.csv",
+        ],
+    )
+
+    assert arguments.target_total_repositories == 120
+    assert arguments.sample_seed == 20260807
+    assert arguments.repository_workers == 4
+    assert arguments.file_workers == 4
+    assert arguments.max_repository_attempts == 3
+    assert arguments.max_model_attempts == 3
+    assert arguments.max_retrieval_attempts == 2
+    assert len(arguments.baseline_checklist) == 2
+    assert len(arguments.exclude_csv) == 2
+
+
+def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--input-dir",
+            str(tmp_path / "population"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--baseline-checklist",
+            str(tmp_path / "baseline.csv"),
+            "--exclude-csv",
+            str(tmp_path / "excluded.csv"),
+        ],
+    )
+    candidate = mocker.Mock(repository="new/project", revision="a" * 40)
+    candidate.fields = {"mainLanguage": "Java"}
+    scheduled = mocker.Mock(candidate=candidate, sample_order=1, round_number=1, language="Java")
+    scheduled.language_population = 10
+    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=(candidate,))
+    mocker.patch("main._input_fingerprints", autospec=True, return_value={"population.csv": "hash"})
+    mocker.patch("main._path_fingerprints", autospec=True, return_value={})
+    mocker.patch(
+        "main.guideline_collection.load_baseline_repositories",
+        autospec=True,
+        return_value={"baseline/project"},
+    )
+    mocker.patch(
+        "main.repository_sampling.load_excluded_repositories",
+        autospec=True,
+        return_value={"baseline/project"},
+    )
+    mocker.patch("main.guideline_collection.validate_baseline_exclusions", autospec=True)
+    mocker.patch(
+        "main.guideline_collection.load_manual_review_state", autospec=True
+    ).return_value = main.guideline_collection.ManualReviewState(set(), set())
+    mocker.patch("main.repository_sampling.stratified_schedule", autospec=True, return_value=(scheduled,))
+    mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
+    store = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True).return_value
+    validate_review = mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)
+    mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
+    mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
+    mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
+    client = mocker.patch("main._collection_classification_client", autospec=True).return_value
+    mocker.patch("main.guideline_collection.CachedRepositoryProcessor", autospec=True)
+    collect = mocker.patch(
+        "main.guideline_collection.collect_repositories",
+        autospec=True,
+        return_value=main.guideline_collection.RepositoryCollectionReport(
+            baseline_repositories=1,
+            new_repository_target=119,
+            confirmed_new_repositories=0,
+            pending_new_repositories=0,
+            selected_new_repositories=0,
+            processed_repositories=1,
+            target_reached=False,
+            human_target_reached=False,
+        ),
+    )
+    write_reports = mocker.patch("main.guideline_collection_reports.write_collection_reports", autospec=True)
+
+    main._collect_guideline_repositories(arguments)
+
+    store.initialize.assert_called_once_with()
+    validate_review.assert_called_once_with(main.guideline_collection.ManualReviewState(set(), set()), store=store)
+    collect.assert_called_once()
+    write_reports.assert_called_once()
+    client.close.assert_called_once_with()
 
 
 def test_classify_markdown_run_cache_never_creates_a_github_client(
@@ -175,6 +283,8 @@ def test_classify_markdown_run_cache_never_creates_a_github_client(
         workers=16,
         blob_batch_size=64,
         max_input_bytes=200_000,
+        max_model_attempts=3,
+        max_retrieval_attempts=2,
     )
     responses.return_value.close.assert_called_once_with()
 

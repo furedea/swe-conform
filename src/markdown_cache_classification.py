@@ -34,6 +34,8 @@ _CANDIDATE_COLUMNS = frozenset(
     },
 )
 DEFAULT_MAX_INPUT_BYTES = 200_000
+DEFAULT_MAX_MODEL_ATTEMPTS = 3
+DEFAULT_MAX_RETRIEVAL_ATTEMPTS = 2
 
 
 class LocalBlobClient(Protocol):
@@ -120,6 +122,8 @@ def run_cache_classification(
     workers: int,
     blob_batch_size: int,
     max_input_bytes: int = DEFAULT_MAX_INPUT_BYTES,
+    max_model_attempts: int = DEFAULT_MAX_MODEL_ATTEMPTS,
+    max_retrieval_attempts: int = DEFAULT_MAX_RETRIEVAL_ATTEMPTS,
 ) -> dict[str, object]:
     """Classify cached Markdown candidates with bounded memory and durable progress."""
     if workers < 1:
@@ -151,10 +155,17 @@ def run_cache_classification(
         "workers": workers,
         "blob_batch_size": blob_batch_size,
         "max_input_bytes": max_input_bytes,
+        "max_model_attempts": max_model_attempts,
+        "max_retrieval_attempts": max_retrieval_attempts,
         "skip_incomplete_repositories": skip_incomplete_repositories,
         "excluded_repositories": sorted(set(excluded_repositories), key=str.casefold),
     }
-    store = markdown_cache_results.CacheClassificationStore(output_dir, configuration=configuration)
+    store = markdown_cache_results.CacheClassificationStore(
+        output_dir,
+        configuration=configuration,
+        max_model_attempts=max_model_attempts,
+        max_retrieval_attempts=max_retrieval_attempts,
+    )
     store.initialize()
     repository_states = _repository_states(
         sources,
@@ -218,6 +229,8 @@ def run_cache_classification(
             "workers": workers,
             "blob_batch_size": blob_batch_size,
             "max_input_bytes": max_input_bytes,
+            "max_model_attempts": max_model_attempts,
+            "max_retrieval_attempts": max_retrieval_attempts,
             "requested": len(candidates),
             "attempted": attempted,
             "resumed": sum(

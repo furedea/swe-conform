@@ -23,6 +23,16 @@ _MANIFEST_FIELDS = (
     "source_file",
     "source_input_index",
 )
+_SCHEDULE_FIELDS = (
+    "sample_order",
+    "round_number",
+    "sampling_language",
+    "language_population",
+    "name",
+    "lastCommitSHA",
+    "source_file",
+    "source_input_index",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +47,17 @@ class SampledRepository:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduledRepository:
+    """One repository in a deterministic stratified draw schedule."""
+
+    candidate: repository.RepositoryCandidate
+    sample_order: int
+    round_number: int
+    language: str
+    language_population: int
+
+
+@dataclass(frozen=True, slots=True)
 class RepositorySamplingReport:
     """Population and sample counts for one persisted sampling run."""
 
@@ -47,6 +68,51 @@ class RepositorySamplingReport:
     language_populations: Mapping[str, int]
     language_sample_sizes: Mapping[str, int]
     output_dir: Path
+
+
+def stratified_schedule(
+    candidates: Sequence[repository.RepositoryCandidate],
+    *,
+    sample_seed: int,
+    excluded_repositories: set[str],
+    languages: Sequence[str] = DEFAULT_LANGUAGES,
+) -> tuple[ScheduledRepository, ...]:
+    """Order complete rounds containing one random repository per language."""
+    normalized_exclusions = {name.casefold() for name in excluded_repositories}
+    _validate_unique_repositories(candidates)
+    strata: defaultdict[str, list[repository.RepositoryCandidate]] = defaultdict(list)
+    for candidate in candidates:
+        language = candidate.fields.get("mainLanguage", "")
+        if language in languages and candidate.repository.casefold() not in normalized_exclusions:
+            strata[language].append(candidate)
+    if any(not strata[language] for language in languages):
+        missing = next(language for language in languages if not strata[language])
+        raise ValueError(f"language stratum {missing} has no eligible repositories")
+    random_source = random.Random(sample_seed)
+    shuffled = {
+        language: random_source.sample(
+            sorted(
+                strata[language],
+                key=lambda candidate: (candidate.repository.casefold(), candidate.revision.casefold()),
+            ),
+            len(strata[language]),
+        )
+        for language in languages
+    }
+    rounds = min(len(population) for population in shuffled.values())
+    scheduled: list[ScheduledRepository] = []
+    for round_index in range(rounds):
+        for language in languages:
+            scheduled.append(
+                ScheduledRepository(
+                    candidate=shuffled[language][round_index],
+                    sample_order=len(scheduled) + 1,
+                    round_number=round_index + 1,
+                    language=language,
+                    language_population=len(strata[language]),
+                ),
+            )
+    return tuple(scheduled)
 
 
 def stratified_sample(
@@ -157,6 +223,25 @@ def write_stratified_sample(
         language_sample_sizes=dict(language_sample_sizes),
         output_dir=output_dir,
     )
+
+
+def write_stratified_schedule(path: Path, scheduled: Sequence[ScheduledRepository]) -> None:
+    """Persist the complete deterministic draw order for sequential collection."""
+    rows = [
+        {
+            "sample_order": item.sample_order,
+            "round_number": item.round_number,
+            "sampling_language": item.language,
+            "language_population": item.language_population,
+            "name": item.candidate.repository,
+            "lastCommitSHA": item.candidate.revision,
+            "source_file": item.candidate.source_file,
+            "source_input_index": item.candidate.input_index,
+        }
+        for item in scheduled
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_csv(path, rows, fieldnames=_SCHEDULE_FIELDS)
 
 
 def load_excluded_repositories(paths: Sequence[Path]) -> set[str]:

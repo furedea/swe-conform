@@ -132,10 +132,66 @@ Both stages verify every Git object reachable from `lastCommitSHA` before
 processing a repository. They never fall back to GitHub. Incomplete and
 explicitly excluded repositories are recorded in `skipped_repositories.csv`.
 Classification records Markdown files larger than `--max-input-bytes` as
-`input_too_large` and leaves their repository in `review`; it neither truncates
-nor submits those files. Reusing an output directory is allowed only when the
-candidate inputs, prompt, schema, model settings, size limit, and cache-safety
-options are unchanged.
+`input_too_large` and leaves their repository unresolved unless another file is
+positive; it neither truncates nor submits those files. Reusing an output
+directory is allowed only when the candidate inputs, prompt, schema, model
+settings, size limit, and cache-safety options are unchanged.
+
+## Target-based stratified collection
+
+Use the integrated collection command to continue the prior 50- and
+20-repository stratified samples until the benchmark contains 120 positive
+repositories. The command computes the human-confirmed baseline from the two
+file-level checklists, excludes every repository in both prior samples, and then
+processes deterministic four-language rounds from the remaining HDD corpus:
+
+```bash
+uv run --frozen --env-file .env python src/main.py collect-guideline-repositories \
+  --input-dir docs/repository-candidates \
+  --output-dir output/guideline-collection \
+  --cache-root /hdd/shigyo/swe-conform-repositories \
+  --baseline-checklist experiments/heldout/manual-review/checklist_full.csv \
+  --baseline-checklist experiments/control/manual-review/checklist_full.csv \
+  --exclude-csv experiments/heldout/input/candidates.csv \
+  --exclude-csv experiments/control/input/candidates.csv \
+  --exclude-repository revanced/revanced-patches \
+  --provider bedrock \
+  --bedrock-region us-east-1 \
+  --repository-workers 4 \
+  --file-workers 4
+```
+
+The default target is 120 repositories. If the supplied checklists contain the
+expected 34 baseline repositories, the command selects 86 new repositories.
+`pass` and semantic `review` file decisions make a repository positive.
+Technical failures never do. Model failures are attempted at most three times,
+retrieval failures at most twice, and repository-level failures at most three
+times by default. `input_too_large` is not retried.
+
+The output keeps both sampling and classification units explicit:
+
+- `sampling_manifest.csv`: the complete fixed repository draw schedule
+- `repository_attempts.jsonl`: every repository-level attempt
+- `screened_repositories.csv`: the latest result for every processed repository
+- `selected_repositories.csv`: the baseline and currently selected repositories
+- `classified_files.csv`: the latest decision for every processed candidate file
+- `file_attempts.jsonl`: every file-level classification attempt
+- `unresolved_files.csv`: latest unresolved file outcomes
+- `manual-review/checklist.csv`: every `pass` or `review` file in selected new repositories
+- `manual-review/<owner--repository>/`: exact Markdown blobs for file-level review
+
+Run the same command with the same output directory to resume without repeating
+terminal file decisions. After completing `human_decision` in the generated
+checklist, add the following argument:
+
+```text
+--human-checklist output/guideline-collection/manual-review/checklist.csv
+```
+
+A repository is human-confirmed when at least one of its candidate files is
+`pass`. It is rejected only when every listed positive file is `not_found`.
+Rejected repositories are replaced by continuing the original fixed sampling
+schedule; existing file labels and earlier checklist rows are preserved.
 
 The default execution uses four workers, `gpt-5.6-luna`, and `max` reasoning
 effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit

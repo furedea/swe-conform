@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
 import markdown_review
 
@@ -260,6 +261,124 @@ def test_manual_review_checklist_groups_rows_by_repository(tmp_path: Path) -> No
     with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
         repositories = [row["repository"] for row in csv.DictReader(input_file)]
     assert repositories == ["alpha/project", "zeta/project"]
+
+
+def test_cached_review_export_writes_pass_and_review_files_from_bare_git(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    rows = (
+        {
+            **_classified_row("candidate-0001", "pass", "", markdown_path="docs/rules.md"),
+            "lastCommitSHA": "a" * 40,
+            "blob_sha": "b" * 40,
+        },
+        {
+            **_classified_row("candidate-0002", "review", "", markdown_path="test/README.md"),
+            "lastCommitSHA": "a" * 40,
+            "blob_sha": "c" * 40,
+        },
+        {
+            **_classified_row("candidate-0003", "not_found", "", markdown_path="README.md"),
+            "lastCommitSHA": "a" * 40,
+            "blob_sha": "d" * 40,
+        },
+    )
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {
+        "b" * 40: "PASS content",
+        "c" * 40: "REVIEW content",
+    }
+    output_dir = tmp_path / "manual-review"
+
+    report = markdown_review.export_cached_review_files(
+        classified_rows=rows,
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+
+    repository_client.get_text_blobs.assert_called_once_with("example/project", ("b" * 40, "c" * 40))
+    assert report.files == 2
+    assert (output_dir / "example--project" / "docs__rules.md").read_text(encoding="utf-8") == "PASS content"
+    with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
+        checklist = list(csv.DictReader(input_file))
+    assert [row["llm_decision"] for row in checklist] == ["pass", "review"]
+    assert all(row["review_origin"] == "added" for row in checklist)
+
+
+def test_cached_review_export_preserves_existing_human_decisions(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    row = {
+        **_classified_row("candidate-0001", "pass", "", markdown_path="docs/rules.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "b" * 40,
+    }
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"b" * 40: "PASS content"}
+    output_dir = tmp_path / "manual-review"
+    markdown_review.export_cached_review_files(
+        classified_rows=(row,),
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+    checklist_path = output_dir / "checklist.csv"
+    with checklist_path.open(encoding="utf-8", newline="") as input_file:
+        existing = list(csv.DictReader(input_file))
+    existing[0]["human_decision"] = "pass"
+    existing[0]["note"] = "checked"
+    with checklist_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=tuple(existing[0]))
+        writer.writeheader()
+        writer.writerows(existing)
+
+    markdown_review.export_cached_review_files(
+        classified_rows=(row,),
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+
+    with checklist_path.open(encoding="utf-8", newline="") as input_file:
+        preserved = list(csv.DictReader(input_file))
+    assert preserved[0]["human_decision"] == "pass"
+    assert preserved[0]["note"] == "checked"
+
+
+def test_cached_review_export_does_not_reuse_a_numbered_filename_on_resume(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    paths = ("docs/test/README.md", "docs__test/README.md", "docs/test__README.md")
+    rows = tuple(
+        {
+            **_classified_row(f"candidate-{index}", "pass", "", markdown_path=path),
+            "lastCommitSHA": "a" * 40,
+            "blob_sha": str(index) * 40,
+        }
+        for index, path in enumerate(paths, start=1)
+    )
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.side_effect = (
+        {"1" * 40: "FIRST", "2" * 40: "SECOND"},
+        {"1" * 40: "FIRST", "2" * 40: "SECOND", "3" * 40: "THIRD"},
+    )
+    output_dir = tmp_path / "manual-review"
+    markdown_review.export_cached_review_files(
+        classified_rows=rows[:2],
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+
+    markdown_review.export_cached_review_files(
+        classified_rows=rows,
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+
+    repository_dir = output_dir / "example--project"
+    assert (repository_dir / "docs__test__README__2.md").read_text(encoding="utf-8") == "SECOND"
+    assert (repository_dir / "docs__test__README__3.md").read_text(encoding="utf-8") == "THIRD"
 
 
 def _classified_row(
