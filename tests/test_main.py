@@ -325,6 +325,41 @@ def test_classify_markdown_export_pass_materializes_manual_review_files(
     assert json.loads(capsys.readouterr().out)["files"] == 64
 
 
+def test_classify_markdown_export_candidates_materializes_blind_review_files(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "candidates.csv"
+    run_dir = tmp_path / "file-judge"
+    review_dir = tmp_path / "manual-review"
+    export = mocker.patch(
+        "main.markdown_review.export_candidate_files",
+        autospec=True,
+        return_value=markdown_review.MarkdownReviewReport(files=127, output_dir=review_dir),
+    )
+
+    main.main(
+        [
+            "classify-markdown",
+            "export-candidates",
+            "--candidate-csv",
+            str(candidate_csv),
+            "--output-dir",
+            str(run_dir),
+            "--review-dir",
+            str(review_dir),
+        ],
+    )
+
+    export.assert_called_once_with(
+        candidate_csv=candidate_csv,
+        batch_input_path=run_dir / "batch_input.jsonl",
+        output_dir=review_dir,
+    )
+    assert json.loads(capsys.readouterr().out)["files"] == 127
+
+
 def test_classify_markdown_evaluate_compares_human_decisions(
     mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
