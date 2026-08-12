@@ -18,13 +18,13 @@ import responses_provider
 
 STRATUM_COUNT = 5
 DEFAULT_MAX_OUTPUT_TOKENS = 16_000
-CLASSIFICATION_PROMPT_VERSION = "code-test-rule-v16"
+CLASSIFICATION_PROMPT_VERSION = "code-test-rule-v17"
 BATCH_INPUT_USD_PER_MILLION_TOKENS = 0.10
 BATCH_CACHED_INPUT_USD_PER_MILLION_TOKENS = 0.01
 BATCH_CACHE_WRITE_INPUT_USD_PER_MILLION_TOKENS = 0.125
 BATCH_OUTPUT_USD_PER_MILLION_TOKENS = 0.60
 PRICING_DATE = "2026-08-06"
-_CLASSIFICATION_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v16.md"
+_CLASSIFICATION_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_v17.md"
 _CLASSIFICATION_SCHEMA_PATH = (
     Path(__file__).resolve().parents[1] / "prompts" / "markdown_file_classification_schema.json"
 )
