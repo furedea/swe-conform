@@ -206,6 +206,13 @@ def _add_classify_markdown_arguments(
     )
     export_parser.add_argument("--output-dir", type=Path, required=True)
     export_parser.add_argument("--review-dir", type=Path, required=True)
+    candidate_export_parser = actions.add_parser(
+        "export-candidates",
+        help="Materialize mechanically selected files for blind manual review",
+    )
+    candidate_export_parser.add_argument("--candidate-csv", type=Path, required=True)
+    candidate_export_parser.add_argument("--output-dir", type=Path, required=True)
+    candidate_export_parser.add_argument("--review-dir", type=Path, required=True)
     evaluate_parser = actions.add_parser(
         "evaluate",
         help="Compare model classifications with a human-decision checklist",
@@ -531,14 +538,15 @@ def _classify_markdown(arguments: argparse.Namespace) -> None:
             batch_input_path=arguments.output_dir / "batch_input.jsonl",
             output_dir=arguments.review_dir,
         )
-        print(
-            json.dumps(
-                {"files": report.files, "output_dir": str(report.output_dir)},
-                indent=2,
-                ensure_ascii=True,
-                sort_keys=True,
-            ),
+        _print_markdown_review_report(report)
+        return
+    if arguments.classification_action == "export-candidates":
+        report = markdown_review.export_candidate_files(
+            candidate_csv=arguments.candidate_csv,
+            batch_input_path=arguments.output_dir / "batch_input.jsonl",
+            output_dir=arguments.review_dir,
         )
+        _print_markdown_review_report(report)
         return
     if arguments.classification_action == "evaluate":
         evaluation_dir = arguments.output_dir / "evaluation"
@@ -640,6 +648,17 @@ def _build_full_codex_checklist(arguments: argparse.Namespace) -> None:
                 "output": str(report.output_path),
                 "output_written": report.output_written,
             },
+            indent=2,
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    )
+
+
+def _print_markdown_review_report(report: markdown_review.MarkdownReviewReport) -> None:
+    print(
+        json.dumps(
+            {"files": report.files, "output_dir": str(report.output_dir)},
             indent=2,
             ensure_ascii=True,
             sort_keys=True,
