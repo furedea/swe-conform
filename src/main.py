@@ -18,6 +18,9 @@ import github_client
 import guideline_classifier
 import markdown_audit
 import markdown_batch
+import markdown_cache_classification
+import markdown_candidate_extraction
+import markdown_candidate_store
 import markdown_evaluation
 import markdown_filename_audit
 import markdown_full_review
@@ -143,6 +146,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_markdown_audit_arguments(filename_audit_parser)
     filename_audit_parser.add_argument("--cache-root", type=Path)
+    filename_audit_parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Read every repository object from --cache-root without GitHub fallback",
+    )
     filename_audit_parser.add_argument("--git-command", default="git")
     _add_batch_markdown_arguments(subparsers)
     _add_classify_markdown_arguments(subparsers)
@@ -200,6 +208,38 @@ def _add_classify_markdown_arguments(
         default=settings.region,
     )
     run_parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
+    run_cache_parser = actions.add_parser(
+        "run-cache",
+        help="Classify candidates directly from revision-pinned bare Git caches",
+    )
+    run_cache_parser.add_argument("--candidate-csv", type=Path, required=True)
+    run_cache_parser.add_argument("--repository-summary-csv", type=Path)
+    run_cache_parser.add_argument("--output-dir", type=Path, required=True)
+    run_cache_parser.add_argument("--cache-root", type=Path, required=True)
+    run_cache_parser.add_argument("--git-command", default="git")
+    run_cache_parser.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
+        default=settings.provider.value,
+    )
+    run_cache_parser.add_argument(
+        "--bedrock-region",
+        choices=responses_provider.BEDROCK_LUNA_REGIONS,
+        default=settings.region,
+    )
+    run_cache_parser.add_argument("--model", default=settings.model)
+    run_cache_parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=settings.reasoning_effort,
+    )
+    run_cache_parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_integer,
+        default=settings.max_output_tokens,
+    )
+    run_cache_parser.add_argument("--workers", type=_positive_integer, default=settings.workers)
+    run_cache_parser.add_argument("--blob-batch-size", type=_positive_integer, default=64)
     export_parser = actions.add_parser(
         "export-pass",
         help="Materialize pass- and review-classified files for manual review",
@@ -468,20 +508,61 @@ def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
         enforce_snapshot_window=arguments.enforce_snapshot_window,
     )
     agent_evidence = markdown_audit.load_agent_evidence(arguments.evidence_csv or ())
-    client = github_client.GitHubClient(token=github_credential())
-    try:
-        tree_client = _markdown_filename_tree_client(arguments, fallback=client)
-        auditor = markdown_filename_audit.MarkdownFilenameAuditor(
-            client=tree_client,
-            agent_evidence=agent_evidence,
+    github: github_client.GitHubClient | None = None
+    if arguments.cache_only:
+        if arguments.cache_root is None:
+            msg = "--cache-root is required when --cache-only is used"
+            raise ValueError(msg)
+        cache = repository_cache.GitRepositoryCache(
+            root=arguments.cache_root,
+            command=arguments.git_command,
         )
+        tree_client: repository_tree.RepositoryTreeClient = repository_tree.LocalRepositoryTreeClient(
+            cache=cache,
+            command=arguments.git_command,
+        )
+    else:
+        github = github_client.GitHubClient(token=github_credential())
+        tree_client = _markdown_filename_tree_client(arguments, fallback=github)
+    auditor = markdown_filename_audit.MarkdownFilenameAuditor(
+        client=tree_client,
+        agent_evidence=agent_evidence,
+    )
+    try:
+        if arguments.cache_only:
+            store = markdown_candidate_store.MarkdownCandidateStore(
+                arguments.output_dir,
+                configuration=_candidate_extraction_configuration(arguments),
+            )
+            store.initialize()
+            stats = markdown_candidate_extraction.run_candidate_extraction(
+                candidates,
+                auditor=auditor,
+                store=store,
+                workers=arguments.workers,
+                limit=arguments.limit,
+                on_progress=_log_candidate_progress,
+            )
+            report = store.report()
+            payload = {
+                "requested": stats.requested,
+                "skipped": stats.skipped,
+                "evaluated": stats.evaluated,
+                "completed": report.stats.completed,
+                "errors": report.stats.errors,
+                "elapsed_seconds": round(stats.elapsed_seconds, 3),
+                "output_dir": str(arguments.output_dir),
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+            return
         runner = markdown_filename_audit.MarkdownFilenameAuditRunner(
             auditor=auditor,
             workers=arguments.workers,
         )
         report = runner.run(candidates, limit=arguments.limit)
     finally:
-        client.close()
+        if github is not None:
+            github.close()
     markdown_filename_audit.write_reports(report, arguments.output_dir)
     payload = {
         "requested": report.stats.requested,
@@ -491,6 +572,16 @@ def _audit_markdown_filenames(arguments: argparse.Namespace) -> None:
         "output_dir": str(arguments.output_dir),
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _candidate_extraction_configuration(arguments: argparse.Namespace) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "input_fingerprints": _input_fingerprints(arguments.input_dir),
+        "evidence_fingerprints": _path_fingerprints(arguments.evidence_csv or ()),
+        "enforce_snapshot_window": arguments.enforce_snapshot_window,
+        "filter": markdown_filename_audit.filter_configuration(),
+    }
 
 
 def _markdown_filename_tree_client(
@@ -531,6 +622,9 @@ def _batch_markdown(arguments: argparse.Namespace) -> None:
 def _classify_markdown(arguments: argparse.Namespace) -> None:
     if arguments.classification_action == "prepare":
         _prepare_markdown_batch(arguments)
+        return
+    if arguments.classification_action == "run-cache":
+        _classify_cached_markdown(arguments)
         return
     if arguments.classification_action == "export-pass":
         report = markdown_review.export_pass_files(
@@ -601,6 +695,43 @@ def _classify_markdown(arguments: argparse.Namespace) -> None:
         )
     finally:
         client.close()
+    print(json.dumps(report, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _classify_cached_markdown(arguments: argparse.Namespace) -> None:
+    cache = repository_cache.GitRepositoryCache(
+        root=arguments.cache_root,
+        command=arguments.git_command,
+    )
+    repository_client = repository_tree.LocalRepositoryTreeClient(
+        cache=cache,
+        command=arguments.git_command,
+    )
+    responses_client = _classification_client(arguments)
+    repository_summary_csv = arguments.repository_summary_csv or (
+        arguments.candidate_csv.parent / "repository_filename_summary.csv"
+    )
+    try:
+        report = markdown_cache_classification.run_cache_classification(
+            candidate_csv=arguments.candidate_csv,
+            repository_summary_csv=repository_summary_csv,
+            output_dir=arguments.output_dir,
+            repository_client=repository_client,
+            responses_client=responses_client,
+            provider=arguments.provider,
+            region=(
+                arguments.bedrock_region
+                if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value
+                else None
+            ),
+            model=arguments.model,
+            reasoning_effort=arguments.reasoning_effort,
+            max_output_tokens=arguments.max_output_tokens,
+            workers=arguments.workers,
+            blob_batch_size=arguments.blob_batch_size,
+        )
+    finally:
+        responses_client.close()
     print(json.dumps(report, indent=2, ensure_ascii=True, sort_keys=True))
 
 
@@ -830,6 +961,34 @@ def _log_fetch_progress(completed: int, total: int, result: cache_runner.CacheFe
         )
 
 
+def _log_candidate_progress(
+    completed: int,
+    total: int,
+    result: markdown_filename_audit.RepositoryMarkdownFilenameAudit,
+) -> None:
+    if result.error:
+        _LOGGER.error(
+            {
+                "action": "markdown_candidate_extraction",
+                "completed": completed,
+                "total": total,
+                "repository": result.candidate.repository,
+                "status": result.status.value,
+                "error": result.error,
+            },
+        )
+    elif completed in {1, total} or completed % 25 == 0:
+        _LOGGER.info(
+            {
+                "action": "markdown_candidate_extraction",
+                "completed": completed,
+                "total": total,
+                "repository": result.candidate.repository,
+                "status": result.status.value,
+            },
+        )
+
+
 def _write_fetch_results(path: Path, results: Sequence[cache_runner.CacheFetchResult]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(_fetch_result_payload(result), ensure_ascii=True, sort_keys=True) for result in results]
@@ -867,6 +1026,14 @@ def _input_fingerprints(input_dir: Path) -> dict[str, str]:
     for input_path in sorted(input_dir.glob("*.csv")):
         with input_path.open("rb") as input_file:
             fingerprints[input_path.name] = hashlib.file_digest(input_file, "sha256").hexdigest()
+    return fingerprints
+
+
+def _path_fingerprints(paths: Sequence[Path]) -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
+    for path in paths:
+        with path.open("rb") as input_file:
+            fingerprints[str(path)] = hashlib.file_digest(input_file, "sha256").hexdigest()
     return fingerprints
 
 

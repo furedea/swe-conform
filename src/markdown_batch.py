@@ -322,6 +322,26 @@ def batch_request(
 ) -> dict[str, object]:
     """Build one Responses API Batch request for one Markdown file."""
     candidate = sampled.sized_candidate.candidate
+    return classification_request(
+        candidate,
+        custom_id=sampled.custom_id,
+        content=content,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def classification_request(
+    candidate: MarkdownCandidate,
+    *,
+    custom_id: str,
+    content: str,
+    model: str,
+    reasoning_effort: str,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+) -> dict[str, object]:
+    """Build one provider-neutral Responses request for one Markdown file."""
     input_text = json.dumps(
         {
             "repository": candidate.repository,
@@ -332,7 +352,7 @@ def batch_request(
         ensure_ascii=False,
     )
     return {
-        "custom_id": sampled.custom_id,
+        "custom_id": custom_id,
         "method": "POST",
         "url": "/v1/responses",
         "body": {
@@ -411,7 +431,7 @@ def prepare_cost_pilot(
             "max_output_tokens": max_output_tokens,
             "workers": workers,
             "prompt_version": CLASSIFICATION_PROMPT_VERSION,
-            "classification_contract_sha256": _classification_contract_sha256(),
+            "classification_contract_sha256": classification_contract_sha256(),
             "pricing_date": PRICING_DATE,
             "batch_input_usd_per_million_tokens": BATCH_INPUT_USD_PER_MILLION_TOKENS,
             "batch_cached_input_usd_per_million_tokens": BATCH_CACHED_INPUT_USD_PER_MILLION_TOKENS,
@@ -500,7 +520,8 @@ def _write_text(path: Path, value: str) -> None:
     temporary_path.replace(path)
 
 
-def _classification_contract_sha256() -> str:
+def classification_contract_sha256() -> str:
+    """Return the prompt and structured-output contract fingerprint."""
     document = {
         "instructions": _classification_instructions(),
         "schema": _classification_schema(),

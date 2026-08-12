@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import guideline
+import markdown_classification
 import openai_responses_client
 
 _SUBMISSION_FILENAME = "batch_submission.json"
@@ -17,7 +18,6 @@ _ERROR_FILENAME = "batch_errors.jsonl"
 _MANIFEST_FILENAME = "sample_manifest.csv"
 _RESULT_FILENAME = "classified_files.csv"
 _COST_FILENAME = "cost_summary.json"
-_LONG_CONTEXT_THRESHOLD = 272_000
 _STRATUM_COUNT = 5
 
 
@@ -183,7 +183,7 @@ def _classification_rows(
         raise ValueError(msg)
     rows = []
     for custom_id, manifest_row in sorted(manifest.items()):
-        result = _classify_result(
+        result = classify_result(
             output=outputs.get(custom_id),
             error=errors.get(custom_id),
             content=contents[custom_id],
@@ -191,7 +191,7 @@ def _classification_rows(
         usage = result.pop("usage")
         assert isinstance(usage, guideline.TokenUsage)
         provider_cost_usd = result.pop("provider_cost_usd")
-        calculated_cost = _request_cost(
+        calculated_cost = markdown_classification.request_cost(
             usage,
             input_usd_per_million_tokens=input_usd_per_million_tokens,
             cached_input_usd_per_million_tokens=cached_input_usd_per_million_tokens,
@@ -215,12 +215,13 @@ def _classification_rows(
     return tuple(rows)
 
 
-def _classify_result(
+def classify_result(
     *,
     output: Mapping[str, object] | None,
     error: Mapping[str, object] | None,
     content: str,
 ) -> dict[str, object]:
+    """Validate one provider result against the exact source content."""
     if output is None:
         return _model_error(error, reason="request_error" if error else "missing_result")
     return _classify_output(output, content=content)
@@ -234,43 +235,16 @@ def _classify_output(output: Mapping[str, object], *, content: str) -> dict[str,
         parsed = openai_responses_client.parse_json_response(
             cast(Mapping[str, object], response.get("body") or {}),
         )
-        label = parsed.value["label"]
-        model_reason = parsed.value["reason"]
-        quote = parsed.value["quote"]
-        confidence = parsed.value["confidence"]
-        if not isinstance(label, str):
-            raise TypeError("label must be a string")
-        if not isinstance(model_reason, str):
-            raise TypeError("reason must be a string")
-        if not isinstance(quote, str):
-            raise TypeError("quote must be a string")
-        if isinstance(confidence, bool) or not isinstance(confidence, int) or not 1 <= confidence <= 10:
-            raise ValueError("confidence must be an integer from 1 to 10")
+        fields = markdown_classification.classification_fields(parsed.value, content=content)
     except (KeyError, TypeError, ValueError, RuntimeError) as exception:
         return _model_error(output, reason=f"invalid_model_response:{exception}")
     base = {
-        "model_label": label,
-        "model_reason": model_reason,
-        "quote": quote,
-        "confidence": confidence,
+        **fields,
         "usage": parsed.usage,
         "provider_result": json.dumps(output, ensure_ascii=True, sort_keys=True),
         "provider_cost_usd": parsed.cost_usd,
     }
-    status, reason = _classification_status(label=label, quote=quote, content=content)
-    return {**base, "status": status, "reason": reason}
-
-
-def _classification_status(*, label: str, quote: str, content: str) -> tuple[str, str]:
-    if label == "YES":
-        if not quote or quote not in content:
-            return "review", "yes_without_quote"
-        return "pass", "verified_quote"
-    if label == "NO":
-        if quote:
-            return "review", "no_with_quote"
-        return "not_found", "model_not_found"
-    return "review", "invalid_label"
+    return base
 
 
 def _model_error(document: Mapping[str, object] | None, *, reason: str) -> dict[str, object]:
@@ -285,25 +259,6 @@ def _model_error(document: Mapping[str, object] | None, *, reason: str) -> dict[
         "provider_result": json.dumps(document or {}, ensure_ascii=True, sort_keys=True),
         "provider_cost_usd": None,
     }
-
-
-def _request_cost(
-    usage: guideline.TokenUsage,
-    *,
-    input_usd_per_million_tokens: float,
-    cached_input_usd_per_million_tokens: float,
-    cache_write_input_usd_per_million_tokens: float,
-    output_usd_per_million_tokens: float,
-) -> float:
-    input_multiplier = 2.0 if usage.input_tokens > _LONG_CONTEXT_THRESHOLD else 1.0
-    output_multiplier = 1.5 if usage.input_tokens > _LONG_CONTEXT_THRESHOLD else 1.0
-    value = (
-        usage.uncached_input_tokens * input_usd_per_million_tokens * input_multiplier
-        + usage.cached_input_tokens * cached_input_usd_per_million_tokens * input_multiplier
-        + usage.cache_write_input_tokens * cache_write_input_usd_per_million_tokens * input_multiplier
-        + usage.output_tokens * output_usd_per_million_tokens * output_multiplier
-    ) / 1_000_000
-    return round(value, 9)
 
 
 def _cost_report(
@@ -349,10 +304,10 @@ def _cost_report(
         "pilot_cost_usd": round(pilot_cost, 6),
         "average_completed_cost_usd": average_completed_cost,
         "short_context_requests": sum(
-            int(str(row["input_tokens"])) <= _LONG_CONTEXT_THRESHOLD for row in completed_rows
+            int(str(row["input_tokens"])) <= markdown_classification.LONG_CONTEXT_THRESHOLD for row in completed_rows
         ),
         "long_context_requests": sum(
-            int(str(row["input_tokens"])) > _LONG_CONTEXT_THRESHOLD for row in completed_rows
+            int(str(row["input_tokens"])) > markdown_classification.LONG_CONTEXT_THRESHOLD for row in completed_rows
         ),
         "estimated_full_batch_usd": estimated_cost,
     }

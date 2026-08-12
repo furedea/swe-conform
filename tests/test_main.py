@@ -12,6 +12,7 @@ import codex_cli_client
 import main
 import markdown_audit
 import markdown_batch
+import markdown_candidate_extraction
 import markdown_evaluation
 import markdown_filename_audit
 import markdown_full_review
@@ -93,6 +94,84 @@ def test_classify_markdown_prepare_uses_the_fixed_project_rule_settings() -> Non
     assert arguments.workers == 16
     assert arguments.provider == "bedrock"
     assert arguments.bedrock_region == "us-east-1"
+
+
+def test_classify_markdown_run_cache_uses_fixed_settings_and_local_paths() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "classify-markdown",
+            "run-cache",
+            "--candidate-csv",
+            "output/candidates/markdown_filename_files.csv",
+            "--output-dir",
+            "output/classification",
+            "--cache-root",
+            "/hdd/shigyo/swe-conform-repositories",
+        ],
+    )
+
+    assert arguments.provider == "bedrock"
+    assert arguments.bedrock_region == "us-east-1"
+    assert arguments.model == "gpt-5.6-luna"
+    assert arguments.reasoning_effort == "max"
+    assert arguments.max_output_tokens == 32_000
+    assert arguments.workers == 16
+    assert arguments.blob_batch_size == 64
+
+
+def test_classify_markdown_run_cache_never_creates_a_github_client(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "candidates" / "markdown_filename_files.csv"
+    candidate_csv.parent.mkdir()
+    candidate_csv.write_text("name\n", encoding="utf-8")
+    repository_summary_csv = candidate_csv.parent / "repository_filename_summary.csv"
+    repository_summary_csv.write_text("name\n", encoding="utf-8")
+    credential = mocker.patch("main.github_credential", autospec=True)
+    github = mocker.patch("main.github_client.GitHubClient", autospec=True)
+    cache = mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
+    local = mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
+    responses = mocker.patch("main._classification_client", autospec=True)
+    run = mocker.patch(
+        "main.markdown_cache_classification.run_cache_classification",
+        autospec=True,
+        return_value={"requested": 10, "completed": 10, "errors": 0},
+    )
+    output_dir = tmp_path / "classification"
+
+    main.main(
+        [
+            "classify-markdown",
+            "run-cache",
+            "--candidate-csv",
+            str(candidate_csv),
+            "--output-dir",
+            str(output_dir),
+            "--cache-root",
+            "/hdd/shigyo/swe-conform-repositories",
+        ],
+    )
+
+    credential.assert_not_called()
+    github.assert_not_called()
+    cache.assert_called_once_with(root=Path("/hdd/shigyo/swe-conform-repositories"), command="git")
+    local.assert_called_once_with(cache=cache.return_value, command="git")
+    run.assert_called_once_with(
+        candidate_csv=candidate_csv,
+        repository_summary_csv=repository_summary_csv,
+        output_dir=output_dir,
+        repository_client=local.return_value,
+        responses_client=responses.return_value,
+        provider="bedrock",
+        region="us-east-1",
+        model="gpt-5.6-luna",
+        reasoning_effort="max",
+        max_output_tokens=32_000,
+        workers=16,
+        blob_batch_size=64,
+    )
+    responses.return_value.close.assert_called_once_with()
 
 
 def test_classify_markdown_prepare_can_select_all_filtered_files() -> None:
@@ -615,6 +694,105 @@ def test_markdown_filename_audit_prefers_the_configured_local_git_cache(
     cache.assert_called_once_with(root=Path("/mnt/hdd/repositories"), command="git")
     client.assert_called_once_with(cache=cache.return_value, fallback=github, command="git")
     assert selected is client.return_value
+
+
+def test_markdown_filename_audit_cache_only_never_creates_a_github_client(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=())
+    mocker.patch("main.markdown_audit.load_agent_evidence", autospec=True, return_value={})
+    credential = mocker.patch("main.github_credential", autospec=True)
+    github = mocker.patch("main.github_client.GitHubClient", autospec=True)
+    cache = mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
+    local = mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
+    auditor = mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
+    runner = mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditRunner", autospec=True)
+    runner.return_value.run.return_value = markdown_filename_audit.MarkdownFilenameAuditReport(
+        results=(),
+        stats=markdown_filename_audit.MarkdownFilenameAuditStats(
+            requested=0,
+            completed=0,
+            errors=0,
+            elapsed_seconds=0.0,
+        ),
+    )
+    mocker.patch("main.markdown_filename_audit.write_reports", autospec=True)
+
+    main.main(
+        [
+            "audit-markdown-filenames",
+            "--input-dir",
+            "experiments/input",
+            "--output-dir",
+            str(tmp_path),
+            "--cache-root",
+            "/mnt/hdd/repositories",
+            "--cache-only",
+        ],
+    )
+
+    credential.assert_not_called()
+    github.assert_not_called()
+    cache.assert_called_once_with(root=Path("/mnt/hdd/repositories"), command="git")
+    local.assert_called_once_with(cache=cache.return_value, command="git")
+    auditor.assert_called_once_with(client=local.return_value, agent_evidence={})
+
+
+def test_markdown_filename_audit_cache_only_uses_the_resumable_candidate_store(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidates = (mocker.sentinel.candidate,)
+    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=candidates)
+    mocker.patch("main.markdown_audit.load_agent_evidence", autospec=True, return_value={})
+    mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
+    mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
+    auditor = mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
+    store = mocker.patch("main.markdown_candidate_store.MarkdownCandidateStore", autospec=True)
+    store.return_value.report.return_value = markdown_filename_audit.MarkdownFilenameAuditReport(
+        results=(),
+        stats=markdown_filename_audit.MarkdownFilenameAuditStats(
+            requested=1,
+            completed=1,
+            errors=0,
+            elapsed_seconds=0.0,
+        ),
+    )
+    run = mocker.patch(
+        "main.markdown_candidate_extraction.run_candidate_extraction",
+        autospec=True,
+        return_value=markdown_candidate_extraction.CandidateExtractionStats(
+            requested=1,
+            skipped=0,
+            evaluated=1,
+            elapsed_seconds=1.25,
+        ),
+    )
+
+    main.main(
+        [
+            "audit-markdown-filenames",
+            "--input-dir",
+            "experiments/input",
+            "--output-dir",
+            str(tmp_path),
+            "--cache-root",
+            "/mnt/hdd/repositories",
+            "--cache-only",
+        ],
+    )
+
+    store.assert_called_once_with(tmp_path, configuration=mocker.ANY)
+    store.return_value.initialize.assert_called_once_with()
+    run.assert_called_once_with(
+        candidates,
+        auditor=auditor.return_value,
+        store=store.return_value,
+        workers=4,
+        limit=None,
+        on_progress=main._log_candidate_progress,
+    )
 
 
 def test_markdown_audit_writes_the_repository_term_coverage_reports(

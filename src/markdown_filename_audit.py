@@ -8,12 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.parse import quote
 
 import github_client
 import repository
+import repository_tree
 
+_BLOB_BATCH_SIZE = 64
 _FILENAME_TERM_PATTERNS = (
     ("readme", re.compile(r"readme", flags=re.IGNORECASE)),
     ("contributing", re.compile(r"contributing", flags=re.IGNORECASE)),
@@ -47,6 +49,8 @@ _FILENAME_FILE_FIELDS = (
     "name",
     "lastCommitSHA",
     "markdown_path",
+    "blob_sha",
+    "size_bytes",
     "markdown_url",
     "matched_filename_terms",
     "matched_content_terms",
@@ -98,6 +102,15 @@ class MarkdownTreeClient(Protocol):
         ...
 
 
+@runtime_checkable
+class MarkdownBlobBatchClient(Protocol):
+    """Retrieve multiple text blobs from one repository in one operation."""
+
+    def get_text_blobs(self, repository: str, blob_shas: tuple[str, ...]) -> dict[str, str]:
+        """Return UTF-8-decoded blobs keyed by Git object ID."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class MarkdownFilenameFile:
     """A filename candidate with the content terms found in its body."""
@@ -105,6 +118,8 @@ class MarkdownFilenameFile:
     path: str
     matched_terms: tuple[str, ...]
     matched_content_terms: tuple[str, ...]
+    blob_sha: str = ""
+    size_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +183,7 @@ class MarkdownFilenameAuditor:
         evidence_paths = self._agent_evidence.get(identity, ())
         try:
             filename_files = scan_github_markdown_filenames(self._client, *identity)
-        except github_client.GitHubRetrievalError as error:
+        except (github_client.GitHubRetrievalError, repository_tree.CachedRepositoryTreeError) as error:
             return RepositoryMarkdownFilenameAudit(
                 candidate=candidate,
                 status=MarkdownFilenameAuditStatus.RETRIEVAL_ERROR,
@@ -233,6 +248,20 @@ def matched_filename_terms(filename: str) -> tuple[str, ...]:
     return tuple(term for term, pattern in _FILENAME_TERM_PATTERNS if pattern.search(filename) is not None)
 
 
+def filter_configuration() -> dict[str, object]:
+    """Return the exact sequential filter contract for run reproducibility."""
+    return {
+        "filename_terms": [
+            {"term": term, "pattern": pattern.pattern, "flags": pattern.flags}
+            for term, pattern in _FILENAME_TERM_PATTERNS
+        ],
+        "content_terms": [
+            {"term": term, "pattern": pattern.pattern, "flags": pattern.flags}
+            for term, pattern in _CONTENT_TERM_PATTERNS
+        ],
+    }
+
+
 def matched_content_terms(content: str) -> tuple[str, ...]:
     """Return normalized candidate terms present in Markdown content."""
     return tuple(term for term, pattern in _CONTENT_TERM_PATTERNS if pattern.search(content) is not None)
@@ -245,23 +274,31 @@ def scan_github_markdown_filenames(
 ) -> tuple[MarkdownFilenameFile, ...]:
     """Return filename candidates annotated with matching content terms."""
     tree = client.get_complete_tree(repository, revision)
+    candidate_entries = tuple(
+        entry
+        for entry in sorted(tree.entries, key=lambda candidate: candidate.path)
+        if entry.mode != "120000"
+        if PurePosixPath(entry.path).suffix.casefold() == ".md"
+        if matched_filename_terms(PurePosixPath(entry.path).name)
+    )
     matches: list[MarkdownFilenameFile] = []
-    for entry in sorted(tree.entries, key=lambda candidate: candidate.path):
-        path = PurePosixPath(entry.path)
-        if entry.mode == "120000" or path.suffix.casefold() != ".md":
-            continue
-        matched_terms = matched_filename_terms(path.name)
-        if not matched_terms:
-            continue
-        content_terms = matched_content_terms(client.get_text_blob(repository, entry.sha))
-        matches.append(
-            MarkdownFilenameFile(
-                path=entry.path,
-                matched_terms=matched_terms,
-                matched_content_terms=content_terms,
-            ),
-        )
-    return tuple(matches)
+    if isinstance(client, MarkdownBlobBatchClient):
+        for start in range(0, len(candidate_entries), _BLOB_BATCH_SIZE):
+            chunk = candidate_entries[start : start + _BLOB_BATCH_SIZE]
+            contents = client.get_text_blobs(repository, tuple(entry.sha for entry in chunk))
+            matches.extend(_filename_file(entry, contents[entry.sha]) for entry in chunk)
+        return tuple(matches)
+    return tuple(_filename_file(entry, client.get_text_blob(repository, entry.sha)) for entry in candidate_entries)
+
+
+def _filename_file(entry: github_client.TreeEntry, content: str) -> MarkdownFilenameFile:
+    return MarkdownFilenameFile(
+        path=entry.path,
+        matched_terms=matched_filename_terms(PurePosixPath(entry.path).name),
+        matched_content_terms=matched_content_terms(content),
+        blob_sha=entry.sha,
+        size_bytes=entry.size,
+    )
 
 
 def compare_agent_evidence(
@@ -330,6 +367,8 @@ def _filename_file_row(
         "name": candidate.repository,
         "lastCommitSHA": candidate.revision,
         "markdown_path": match.path,
+        "blob_sha": match.blob_sha,
+        "size_bytes": match.size_bytes,
         "markdown_url": _github_file_url(candidate, match.path),
         "matched_filename_terms": "|".join(match.matched_terms),
         "matched_content_terms": "|".join(match.matched_content_terms),
