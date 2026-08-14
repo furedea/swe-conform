@@ -235,7 +235,8 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     ).return_value = main.guideline_collection.ManualReviewState(set(), set())
     mocker.patch("main.repository_sampling.stratified_schedule", autospec=True, return_value=(scheduled,))
     mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
-    store = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True).return_value
+    store_factory = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True)
+    store = store_factory.return_value
     validate_review = mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)
     mocker.patch("main.repository_cache.GitRepositoryCache", autospec=True)
     mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
@@ -261,6 +262,7 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     main._collect_guideline_repositories(arguments)
 
     store.initialize.assert_called_once_with()
+    assert "max_screened_repositories" not in store_factory.call_args.kwargs["configuration"]
     validate_review.assert_called_once_with(main.guideline_collection.ManualReviewState(set(), set()), store=store)
     collect.assert_called_once()
     write_reports.assert_called_once()

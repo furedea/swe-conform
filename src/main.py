@@ -624,7 +624,6 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "sample_seed": arguments.sample_seed,
         "languages": list(repository_sampling.DEFAULT_LANGUAGES),
         "target_total_repositories": arguments.target_total_repositories,
-        "max_screened_repositories": arguments.max_screened_repositories,
         "baseline_repositories": sorted(baseline_repositories, key=str.casefold),
         "excluded_repositories": sorted(excluded_repositories, key=str.casefold),
         "input_fingerprints": _input_fingerprints(arguments.input_dir),
