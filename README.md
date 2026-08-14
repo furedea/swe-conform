@@ -143,12 +143,16 @@ Use the integrated collection command to continue the prior 50- and
 20-repository stratified samples until the benchmark contains 120 positive
 repositories. The command computes the human-confirmed baseline from the two
 file-level checklists, excludes every repository in both prior samples, and then
-processes deterministic four-language rounds from the remaining HDD corpus:
+processes deterministic four-language rounds from an explicitly selected
+repository source.
+
+Use the HDD bare repositories for a cache-backed run:
 
 ```bash
 uv run --frozen --env-file .env python src/main.py collect-guideline-repositories \
   --input-dir docs/repository-candidates \
   --output-dir output/guideline-collection \
+  --repository-source cache \
   --cache-root /hdd/shigyo/swe-conform-repositories \
   --baseline-checklist experiments/heldout/manual-review/checklist_full.csv \
   --baseline-checklist experiments/control/manual-review/checklist_full.csv \
@@ -161,12 +165,42 @@ uv run --frozen --env-file .env python src/main.py collect-guideline-repositorie
   --file-workers 4
 ```
 
+Use GitHub for a smaller local run without the HDD corpus:
+
+```bash
+uv run --frozen --env-file .env python src/main.py collect-guideline-repositories \
+  --input-dir docs/repository-candidates \
+  --output-dir output/guideline-collection-github \
+  --repository-source github \
+  --baseline-checklist experiments/heldout/manual-review/checklist_full.csv \
+  --baseline-checklist experiments/control/manual-review/checklist_full.csv \
+  --exclude-csv experiments/heldout/input/candidates.csv \
+  --exclude-csv experiments/control/input/candidates.csv \
+  --max-screened-repositories 200 \
+  --provider bedrock \
+  --bedrock-region us-east-1 \
+  --repository-workers 4 \
+  --file-workers 16
+```
+
+GitHub runs retrieve the tree at each recorded `lastCommitSHA` and persist every
+downloaded candidate blob under `source-content/`. Filename filtering,
+content filtering, LLM classification, resumption, and manual-review export
+reuse those files. GitHub REST requests are serialized and honor primary and
+secondary rate-limit waits; file-classification requests remain concurrent.
+
 The default target is 120 repositories. If the supplied checklists contain the
 expected 34 baseline repositories, the command selects 86 new repositories.
 `pass` and semantic `review` file decisions make a repository positive.
 Technical failures never do. Model failures are attempted at most three times,
 retrieval failures at most twice, and repository-level failures at most three
 times by default. `input_too_large` is not retried.
+
+`--max-screened-repositories` is an optional execution budget rather than part
+of the classification contract. The command stops before a complete
+four-language round would exceed the limit. If the target is not reached,
+increase the limit and reuse the same output directory to continue from the
+existing checkpoints.
 
 The output keeps both sampling and classification units explicit:
 
@@ -179,6 +213,8 @@ The output keeps both sampling and classification units explicit:
 - `unresolved_files.csv`: latest unresolved file outcomes
 - `manual-review/checklist.csv`: every `pass` or `review` file in selected new repositories
 - `manual-review/<owner--repository>/`: exact Markdown blobs for file-level review
+- `source-content/`: GitHub blobs reused by filtering, classification, and review in `github` mode
+- `collection_summary.json`: repository, file, GitHub request, rate-limit wait, and blob-cache totals
 
 Run the same command with the same output directory to resume without repeating
 terminal file decisions. After completing `human_decision` in the generated
