@@ -15,6 +15,7 @@ import bedrock_responses_client
 import cache_runner
 import codex_cli_client
 import github_client
+import github_repository
 import guideline_classifier
 import guideline_collection
 import guideline_collection_reports
@@ -594,6 +595,7 @@ def _sample_repositories(arguments: argparse.Namespace) -> None:
 
 
 def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
+    _validate_collection_repository_source(arguments)
     candidates = repository.load_repository_candidates(
         arguments.input_dir,
         enforce_snapshot_window=arguments.enforce_snapshot_window,
@@ -614,7 +616,8 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         excluded_repositories=excluded_repositories,
     )
     configuration = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "repository_source": arguments.repository_source,
         "sampling_method": "stratified_random_round_robin_until_target",
         "sampling_unit": "repository",
         "sample_seed": arguments.sample_seed,
@@ -643,7 +646,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "max_retrieval_attempts": arguments.max_retrieval_attempts,
         "max_input_bytes": arguments.max_input_bytes,
         "blob_batch_size": arguments.blob_batch_size,
-        "cache_root": str(arguments.cache_root),
+        "cache_root": str(arguments.cache_root) if arguments.cache_root is not None else None,
         "git_command": arguments.git_command,
         "enforce_snapshot_window": arguments.enforce_snapshot_window,
     }
@@ -651,15 +654,36 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     store.initialize()
     guideline_collection.validate_manual_review_state(manual_review, store=store)
     repository_sampling.write_stratified_schedule(arguments.output_dir / "sampling_manifest.csv", schedule)
-    cache = repository_cache.GitRepositoryCache(root=arguments.cache_root, command=arguments.git_command)
-    repository_client = repository_tree.LocalRepositoryTreeClient(cache=cache, command=arguments.git_command)
+    github: github_client.GitHubClient | None = None
+    if arguments.repository_source == "cache":
+        assert arguments.cache_root is not None
+        snapshot_inspector: markdown_candidate_extraction.SnapshotInspector | None = (
+            repository_cache.GitRepositoryCache(
+                root=arguments.cache_root,
+                command=arguments.git_command,
+            )
+        )
+        repository_client: markdown_filename_audit.MarkdownTreeClient = repository_tree.LocalRepositoryTreeClient(
+            cache=snapshot_inspector,
+            command=arguments.git_command,
+        )
+        skip_incomplete_repositories = True
+    else:
+        github = github_client.GitHubClient(token=github_credential())
+        repository_client = github_repository.PersistentGitHubRepositoryClient(
+            client=github,
+            content_root=arguments.output_dir / "source-content",
+        )
+        snapshot_inspector = None
+        skip_incomplete_repositories = False
     auditor = markdown_filename_audit.MarkdownFilenameAuditor(client=repository_client, agent_evidence={})
     responses_client = _collection_classification_client(arguments)
-    processor = guideline_collection.CachedRepositoryProcessor(
+    processor = guideline_collection.RepositoryFileProcessor(
         output_dir=arguments.output_dir,
         auditor=auditor,
         repository_client=repository_client,
-        snapshot_inspector=cache,
+        snapshot_inspector=snapshot_inspector,
+        skip_incomplete_repositories=skip_incomplete_repositories,
         responses_client=responses_client,
         provider=arguments.provider,
         region=(
@@ -678,8 +702,8 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         candidate_configuration={
             "schema_version": 1,
             "filter": markdown_filename_audit.filter_configuration(),
-            "cache_only": True,
-            "skip_incomplete_repositories": True,
+            "repository_source": arguments.repository_source,
+            "skip_incomplete_repositories": skip_incomplete_repositories,
         },
     )
     try:
@@ -706,6 +730,8 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             rejected_repositories=manual_review.rejected_repositories,
         )
         responses_client.close()
+        if github is not None:
+            github.close()
     payload = {
         "baseline_repositories": report.baseline_repositories,
         "excluded_repositories": len(excluded_repositories),
@@ -721,6 +747,13 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "output_dir": str(arguments.output_dir),
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _validate_collection_repository_source(arguments: argparse.Namespace) -> None:
+    if arguments.repository_source == "cache" and arguments.cache_root is None:
+        raise ValueError("--cache-root is required when --repository-source=cache")
+    if arguments.repository_source == "github" and arguments.cache_root is not None:
+        raise ValueError("--cache-root cannot be used when --repository-source=github")
 
 
 def _audit_markdown(arguments: argparse.Namespace) -> None:

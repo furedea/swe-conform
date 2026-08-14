@@ -38,8 +38,8 @@ DEFAULT_MAX_MODEL_ATTEMPTS = 3
 DEFAULT_MAX_RETRIEVAL_ATTEMPTS = 2
 
 
-class LocalBlobClient(Protocol):
-    """Read multiple blobs from one local bare repository."""
+class BlobClient(Protocol):
+    """Read multiple immutable Git blobs for one repository."""
 
     def get_text_blobs(self, repository: str, blob_shas: tuple[str, ...]) -> dict[str, str]:
         """Return UTF-8-decoded blobs keyed by Git object ID."""
@@ -109,7 +109,7 @@ def run_cache_classification(
     candidate_csv: Path,
     repository_summary_csv: Path | None = None,
     output_dir: Path,
-    repository_client: LocalBlobClient,
+    repository_client: BlobClient,
     snapshot_inspector: SnapshotInspector | None = None,
     skip_incomplete_repositories: bool = False,
     excluded_repositories: Sequence[str] = (),
@@ -303,7 +303,7 @@ def load_cached_candidates(path: Path) -> tuple[CachedMarkdownCandidate, ...]:
 def _classify_pending(
     candidates: Sequence[CachedMarkdownCandidate],
     *,
-    repository_client: LocalBlobClient,
+    repository_client: BlobClient,
     responses_client: markdown_responses_runner.ResponsesClient,
     provider: str,
     model: str,
@@ -419,7 +419,7 @@ def _fill_futures(
 
 def _candidate_contents(
     candidates: Sequence[CachedMarkdownCandidate],
-    client: LocalBlobClient,
+    client: BlobClient,
     *,
     blob_batch_size: int,
     max_input_bytes: int,

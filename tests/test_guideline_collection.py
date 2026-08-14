@@ -307,11 +307,12 @@ def test_cached_repository_processor_persists_each_file_decision(
         usage=guideline.TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
         document=_response_document(value),
     )
-    processor = guideline_collection.CachedRepositoryProcessor(
+    processor = guideline_collection.RepositoryFileProcessor(
         output_dir=tmp_path,
         auditor=auditor,
         repository_client=repository_client,
         snapshot_inspector=inspector,
+        skip_incomplete_repositories=True,
         responses_client=responses_client,
         provider="bedrock",
         region="us-east-1",

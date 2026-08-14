@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import cast
 
 import guideline_collection
+import markdown_cache_classification
 import markdown_cache_results
 import markdown_review
 import repository
 import repository_sampling
-import repository_tree
 
 _CLASSIFIED_FILES_FILENAME = "classified_files.csv"
 _FILE_ATTEMPTS_FILENAME = "file_attempts.jsonl"
@@ -28,7 +28,7 @@ def write_collection_reports(
     store: guideline_collection.RepositoryCollectionStore,
     baseline_repositories: set[str],
     target_total_repositories: int,
-    repository_client: repository_tree.LocalRepositoryTreeClient,
+    repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
 ) -> None:

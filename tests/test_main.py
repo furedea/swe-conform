@@ -221,7 +221,7 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     mocker.patch("main.repository_tree.LocalRepositoryTreeClient", autospec=True)
     mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
     client = mocker.patch("main._collection_classification_client", autospec=True).return_value
-    mocker.patch("main.guideline_collection.CachedRepositoryProcessor", autospec=True)
+    mocker.patch("main.guideline_collection.RepositoryFileProcessor", autospec=True)
     collect = mocker.patch(
         "main.guideline_collection.collect_repositories",
         autospec=True,
@@ -245,6 +245,91 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     collect.assert_called_once()
     write_reports.assert_called_once()
     client.close.assert_called_once_with()
+
+
+def test_collect_guideline_repositories_runs_the_github_file_pipeline(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--input-dir",
+            str(tmp_path / "population"),
+            "--output-dir",
+            str(output_dir),
+            "--baseline-checklist",
+            str(tmp_path / "baseline.csv"),
+            "--exclude-csv",
+            str(tmp_path / "excluded.csv"),
+        ],
+    )
+    candidate = mocker.Mock(repository="new/project", revision="a" * 40)
+    candidate.fields = {"mainLanguage": "Java"}
+    scheduled = mocker.Mock(candidate=candidate, sample_order=1, round_number=1, language="Java")
+    scheduled.language_population = 10
+    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=(candidate,))
+    mocker.patch("main._input_fingerprints", autospec=True, return_value={"population.csv": "hash"})
+    mocker.patch("main._path_fingerprints", autospec=True, return_value={})
+    mocker.patch(
+        "main.guideline_collection.load_baseline_repositories",
+        autospec=True,
+        return_value={"baseline/project"},
+    )
+    mocker.patch(
+        "main.repository_sampling.load_excluded_repositories",
+        autospec=True,
+        return_value={"baseline/project"},
+    )
+    mocker.patch("main.guideline_collection.validate_baseline_exclusions", autospec=True)
+    mocker.patch(
+        "main.guideline_collection.load_manual_review_state",
+        autospec=True,
+        return_value=main.guideline_collection.ManualReviewState(set(), set()),
+    )
+    mocker.patch("main.repository_sampling.stratified_schedule", autospec=True, return_value=(scheduled,))
+    mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
+    store = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True).return_value
+    mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)
+    credential = mocker.patch("main.github_credential", autospec=True, return_value="github-credential")
+    github = mocker.patch("main.github_client.GitHubClient", autospec=True)
+    persistent = mocker.patch("main.github_repository.PersistentGitHubRepositoryClient", autospec=True)
+    mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
+    responses = mocker.patch("main._collection_classification_client", autospec=True).return_value
+    processor = mocker.patch("main.guideline_collection.RepositoryFileProcessor", autospec=True).return_value
+    collect = mocker.patch(
+        "main.guideline_collection.collect_repositories",
+        autospec=True,
+        return_value=main.guideline_collection.RepositoryCollectionReport(
+            baseline_repositories=1,
+            new_repository_target=119,
+            confirmed_new_repositories=0,
+            pending_new_repositories=0,
+            selected_new_repositories=0,
+            processed_repositories=1,
+            target_reached=False,
+            human_target_reached=False,
+        ),
+    )
+    write_reports = mocker.patch("main.guideline_collection_reports.write_collection_reports", autospec=True)
+
+    main._collect_guideline_repositories(arguments)
+
+    credential.assert_called_once_with()
+    github.assert_called_once_with(token="github-credential")
+    persistent.assert_called_once_with(
+        client=github.return_value,
+        content_root=output_dir / "source-content",
+    )
+    collect.assert_called_once()
+    assert collect.call_args.kwargs["processor"] is processor
+    write_reports.assert_called_once()
+    responses.close.assert_called_once_with()
+    github.return_value.close.assert_called_once_with()
+    store.initialize.assert_called_once_with()
 
 
 def test_classify_markdown_run_cache_never_creates_a_github_client(

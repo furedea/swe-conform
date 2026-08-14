@@ -16,7 +16,6 @@ import markdown_filename_audit
 import markdown_responses_runner
 import repository
 import repository_sampling
-import repository_tree
 
 _ATTEMPTS_FILENAME = "repository_attempts.jsonl"
 _CONFIGURATION_FILENAME = "collection_configuration.json"
@@ -94,13 +93,14 @@ class ManualReviewState:
 
 
 @dataclass(frozen=True, slots=True)
-class CachedRepositoryProcessor:
-    """Extract and classify one scheduled repository from a bare Git cache."""
+class RepositoryFileProcessor:
+    """Extract and classify one scheduled repository through a blob client."""
 
     output_dir: Path
     auditor: markdown_filename_audit.MarkdownFilenameAuditor
-    repository_client: repository_tree.LocalRepositoryTreeClient
-    snapshot_inspector: markdown_candidate_extraction.SnapshotInspector
+    repository_client: markdown_cache_classification.BlobClient
+    snapshot_inspector: markdown_candidate_extraction.SnapshotInspector | None
+    skip_incomplete_repositories: bool
     responses_client: markdown_responses_runner.ResponsesClient
     provider: str
     region: str | None
@@ -133,7 +133,7 @@ class CachedRepositoryProcessor:
             store=candidate_store,
             workers=1,
             snapshot_inspector=self.snapshot_inspector,
-            skip_incomplete_repositories=True,
+            skip_incomplete_repositories=self.skip_incomplete_repositories,
         )
         extraction = candidate_store.report().results[0]
         if extraction.status is not markdown_filename_audit.MarkdownFilenameAuditStatus.COMPLETED:
@@ -155,7 +155,7 @@ class CachedRepositoryProcessor:
             output_dir=classification_dir,
             repository_client=self.repository_client,
             snapshot_inspector=self.snapshot_inspector,
-            skip_incomplete_repositories=True,
+            skip_incomplete_repositories=self.skip_incomplete_repositories,
             responses_client=self.responses_client,
             provider=self.provider,
             region=self.region,
