@@ -31,6 +31,8 @@ def write_collection_reports(
     repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
+    max_screened_repositories: int | None = None,
+    screening_limit_reached: bool = False,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
     new_target = target_total_repositories - len(baseline_repositories)
@@ -78,6 +80,8 @@ def write_collection_reports(
         file_rows=file_rows,
         selected_file_rows=selected_file_rows,
         unresolved_count=len(unresolved),
+        max_screened_repositories=max_screened_repositories,
+        screening_limit_reached=screening_limit_reached,
     )
 
 
@@ -199,6 +203,8 @@ def _write_summary(
     file_rows: Sequence[Mapping[str, object]],
     selected_file_rows: Sequence[Mapping[str, object]],
     unresolved_count: int,
+    max_screened_repositories: int | None,
+    screening_limit_reached: bool,
 ) -> None:
     new_target = target_total - baseline_count
     _write_json(
@@ -212,6 +218,8 @@ def _write_summary(
             "selected_new_repositories": confirmed_count + pending_count,
             "selected_total_repositories": baseline_count + confirmed_count + pending_count,
             "processed_repositories": processed_count,
+            "max_screened_repositories": max_screened_repositories,
+            "screening_limit_reached": screening_limit_reached,
             "target_total_repositories": target_total,
             "target_reached": confirmed_count + pending_count >= new_target,
             "human_target_reached": confirmed_count >= new_target,

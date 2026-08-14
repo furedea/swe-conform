@@ -178,6 +178,7 @@ def _add_guideline_collection_arguments(
     )
     parser.add_argument("--exclude-repository", action="append", default=[])
     parser.add_argument("--target-total-repositories", type=_positive_integer, default=120)
+    parser.add_argument("--max-screened-repositories", type=_positive_integer)
     parser.add_argument("--sample-seed", type=int, default=_DEFAULT_REPOSITORY_SAMPLE_SEED)
     parser.add_argument("--repository-workers", type=_positive_integer, default=4)
     parser.add_argument("--file-workers", type=_positive_integer, default=4)
@@ -623,6 +624,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "sample_seed": arguments.sample_seed,
         "languages": list(repository_sampling.DEFAULT_LANGUAGES),
         "target_total_repositories": arguments.target_total_repositories,
+        "max_screened_repositories": arguments.max_screened_repositories,
         "baseline_repositories": sorted(baseline_repositories, key=str.casefold),
         "excluded_repositories": sorted(excluded_repositories, key=str.casefold),
         "input_fingerprints": _input_fingerprints(arguments.input_dir),
@@ -706,6 +708,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             "skip_incomplete_repositories": skip_incomplete_repositories,
         },
     )
+    report: guideline_collection.RepositoryCollectionReport | None = None
     try:
         report = guideline_collection.collect_repositories(
             schedule,
@@ -717,6 +720,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             processor=processor,
             workers=arguments.repository_workers,
             max_repository_attempts=arguments.max_repository_attempts,
+            max_screened_repositories=arguments.max_screened_repositories,
         )
     finally:
         guideline_collection_reports.write_collection_reports(
@@ -728,10 +732,13 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             repository_client=repository_client,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
+            max_screened_repositories=arguments.max_screened_repositories,
+            screening_limit_reached=report.screening_limit_reached if report is not None else False,
         )
         responses_client.close()
         if github is not None:
             github.close()
+    assert report is not None
     payload = {
         "baseline_repositories": report.baseline_repositories,
         "excluded_repositories": len(excluded_repositories),
@@ -742,6 +749,8 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "selected_new_repositories": report.selected_new_repositories,
         "selected_total_repositories": report.baseline_repositories + report.selected_new_repositories,
         "processed_repositories": report.processed_repositories,
+        "max_screened_repositories": arguments.max_screened_repositories,
+        "screening_limit_reached": report.screening_limit_reached,
         "target_reached": report.target_reached,
         "human_target_reached": report.human_target_reached,
         "output_dir": str(arguments.output_dir),

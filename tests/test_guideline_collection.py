@@ -152,6 +152,36 @@ def test_collection_stops_after_the_complete_round_that_reaches_the_new_target(
     assert report.target_reached is True
 
 
+def test_collection_stops_before_a_stratified_round_would_exceed_the_screening_limit(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    languages = repository_sampling.DEFAULT_LANGUAGES
+    schedule = tuple(_scheduled_repository(languages[(order - 1) % len(languages)], order) for order in range(1, 9))
+    processor = mocker.Mock()
+    processor.process.side_effect = lambda item: guideline_collection.RepositoryScreening(
+        item,
+        status="not_found",
+    )
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    report = guideline_collection.collect_repositories(
+        schedule,
+        baseline_repository_count=34,
+        target_total_repositories=120,
+        store=store,
+        processor=processor,
+        workers=4,
+        max_screened_repositories=6,
+    )
+
+    assert processor.process.call_count == 4
+    assert report.processed_repositories == 4
+    assert report.target_reached is False
+    assert report.screening_limit_reached is True
+
+
 def test_collection_retries_unresolved_repositories_before_freezing_selection(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -259,6 +289,8 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
         baseline_repositories={"baseline/project"},
         target_total_repositories=2,
         repository_client=repository_client,
+        max_screened_repositories=200,
+        screening_limit_reached=True,
     )
 
     with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
@@ -268,6 +300,9 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     assert [row["status"] for row in classified] == ["review", "pass", "not_found"]
     assert [row["llm_decision"] for row in checklist] == ["review", "pass"]
     assert len((tmp_path / "file_attempts.jsonl").read_text(encoding="utf-8").splitlines()) == 3
+    summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
+    assert summary["max_screened_repositories"] == 200
+    assert summary["screening_limit_reached"] is True
 
 
 def test_cached_repository_processor_persists_each_file_decision(

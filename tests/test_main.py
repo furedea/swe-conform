@@ -173,6 +173,26 @@ def test_collect_guideline_repositories_accepts_github_without_a_cache_root() ->
     assert arguments.cache_root is None
 
 
+def test_collect_guideline_repositories_accepts_a_screening_cost_limit() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+            "--max-screened-repositories",
+            "200",
+        ],
+    )
+
+    assert arguments.max_screened_repositories == 200
+
+
 def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -265,6 +285,8 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
             str(tmp_path / "baseline.csv"),
             "--exclude-csv",
             str(tmp_path / "excluded.csv"),
+            "--max-screened-repositories",
+            "200",
         ],
     )
     candidate = mocker.Mock(repository="new/project", revision="a" * 40)
@@ -326,6 +348,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
     )
     collect.assert_called_once()
     assert collect.call_args.kwargs["processor"] is processor
+    assert collect.call_args.kwargs["max_screened_repositories"] == 200
     write_reports.assert_called_once()
     responses.close.assert_called_once_with()
     github.return_value.close.assert_called_once_with()

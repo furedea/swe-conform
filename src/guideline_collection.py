@@ -82,6 +82,7 @@ class RepositoryCollectionReport:
     processed_repositories: int
     target_reached: bool
     human_target_reached: bool
+    screening_limit_reached: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,32 +337,34 @@ def collect_repositories(
     processor: RepositoryProcessor,
     workers: int,
     max_repository_attempts: int = 3,
+    max_screened_repositories: int | None = None,
 ) -> RepositoryCollectionReport:
     """Process complete stratified rounds until enough repositories are positive."""
-    if baseline_repository_count < 0:
-        raise ValueError("baseline_repository_count must not be negative")
-    if target_total_repositories < baseline_repository_count:
-        raise ValueError("target_total_repositories must include every baseline repository")
-    if workers < 1:
-        raise ValueError("workers must be at least 1")
-    if max_repository_attempts < 1:
-        raise ValueError("max_repository_attempts must be at least 1")
     new_target = target_total_repositories - baseline_repository_count
     confirmed = set(confirmed_repositories or ())
     rejected = set(rejected_repositories or ())
-    if {name.casefold() for name in confirmed}.intersection(name.casefold() for name in rejected):
-        raise ValueError("confirmed and rejected repositories must be disjoint")
-    if len(confirmed) > new_target:
-        raise ValueError("confirmed repositories exceed the new repository target")
+    _validate_collection_parameters(
+        baseline_repository_count=baseline_repository_count,
+        target_total_repositories=target_total_repositories,
+        confirmed_repositories=confirmed,
+        rejected_repositories=rejected,
+        workers=workers,
+        max_repository_attempts=max_repository_attempts,
+        max_screened_repositories=max_screened_repositories,
+    )
     remaining_target = new_target - len(confirmed)
     reviewed = confirmed | rejected
     rounds: defaultdict[int, list[repository_sampling.ScheduledRepository]] = defaultdict(list)
     for item in schedule:
         rounds[item.round_number].append(item)
+    screening_limit_reached = False
     for round_number in sorted(rounds):
         if len(store.selected(remaining_target, excluded_repositories=reviewed)) >= remaining_target:
             break
         pending = tuple(item for item in rounds[round_number] if item.sample_order not in store.completed_orders())
+        if max_screened_repositories is not None and len(store.results()) + len(pending) > max_screened_repositories:
+            screening_limit_reached = True
+            break
         _process_repositories(pending, processor=processor, store=store, workers=workers)
     while remaining_target:
         retryable = store.retryable(max_attempts=max_repository_attempts)
@@ -374,6 +377,7 @@ def collect_repositories(
             workers=workers,
         )
     pending = store.selected(remaining_target, excluded_repositories=reviewed)
+    target_reached = len(confirmed) + len(pending) >= new_target
     return RepositoryCollectionReport(
         baseline_repositories=baseline_repository_count,
         new_repository_target=new_target,
@@ -381,9 +385,39 @@ def collect_repositories(
         pending_new_repositories=len(pending),
         selected_new_repositories=len(confirmed) + len(pending),
         processed_repositories=len(store.results()),
-        target_reached=len(confirmed) + len(pending) >= new_target,
+        target_reached=target_reached,
         human_target_reached=len(confirmed) >= new_target,
+        screening_limit_reached=screening_limit_reached and not target_reached,
     )
+
+
+def _validate_collection_parameters(
+    *,
+    baseline_repository_count: int,
+    target_total_repositories: int,
+    confirmed_repositories: set[str],
+    rejected_repositories: set[str],
+    workers: int,
+    max_repository_attempts: int,
+    max_screened_repositories: int | None,
+) -> None:
+    if baseline_repository_count < 0:
+        raise ValueError("baseline_repository_count must not be negative")
+    if target_total_repositories < baseline_repository_count:
+        raise ValueError("target_total_repositories must include every baseline repository")
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if max_repository_attempts < 1:
+        raise ValueError("max_repository_attempts must be at least 1")
+    if max_screened_repositories is not None and max_screened_repositories < 1:
+        raise ValueError("max_screened_repositories must be at least 1")
+    if {name.casefold() for name in confirmed_repositories}.intersection(
+        name.casefold() for name in rejected_repositories
+    ):
+        raise ValueError("confirmed and rejected repositories must be disjoint")
+    new_target = target_total_repositories - baseline_repository_count
+    if len(confirmed_repositories) > new_target:
+        raise ValueError("confirmed repositories exceed the new repository target")
 
 
 def _process_repositories(
