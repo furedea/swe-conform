@@ -2,6 +2,7 @@
 
 import csv
 import json
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
@@ -100,11 +101,10 @@ def _file_records(
         classification_dir = output_dir / "repositories" / f"{scheduled.sample_order:05d}" / "classification"
         latest_path = classification_dir / "classified_files.csv"
         if latest_path.exists():
-            with latest_path.open(encoding="utf-8", newline="") as input_file:
-                latest.extend(
-                    _collection_file_record(row, scheduled=scheduled, selected_names=selected_names)
-                    for row in csv.DictReader(input_file)
-                )
+            latest.extend(
+                _collection_file_record(row, scheduled=scheduled, selected_names=selected_names)
+                for row in _csv_rows(latest_path)
+            )
         checkpoint_path = classification_dir / "cache_classification_checkpoint.jsonl"
         if checkpoint_path.exists():
             for line in checkpoint_path.read_text(encoding="utf-8").splitlines():
@@ -133,6 +133,16 @@ def _collection_file_record(
 
 def _file_record_order(row: dict[str, object]) -> tuple[int, str]:
     return int(str(row["sample_order"])), str(row["markdown_path"]).casefold()
+
+
+def _csv_rows(path: Path) -> tuple[dict[str, str], ...]:
+    previous_limit = csv.field_size_limit()
+    csv.field_size_limit(sys.maxsize)
+    try:
+        with path.open(encoding="utf-8", newline="") as input_file:
+            return tuple(dict(row) for row in csv.DictReader(input_file))
+    finally:
+        csv.field_size_limit(previous_limit)
 
 
 def _write_repository_reports(

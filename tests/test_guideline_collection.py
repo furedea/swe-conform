@@ -317,6 +317,41 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     source_metrics.assert_called_once_with()
 
 
+def test_collection_reports_read_provider_results_larger_than_the_active_csv_limit(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(scheduled, status="pass", pass_count=1))
+    classification_dir = tmp_path / "repositories" / "00001" / "classification"
+    classification_dir.mkdir(parents=True)
+    row = _file_row(scheduled, "docs/rules.md", "a" * 40, "pass")
+    row["provider_result"] = "x" * 2_048
+    _write_rows(classification_dir / "classified_files.csv", [row])
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"a" * 40: "PASS"}
+    previous_limit = csv.field_size_limit()
+    csv.field_size_limit(1_024)
+
+    try:
+        guideline_collection_reports.write_collection_reports(
+            output_dir=tmp_path,
+            population=(scheduled.candidate,),
+            store=store,
+            baseline_repositories=set(),
+            target_total_repositories=1,
+            repository_client=repository_client,
+        )
+    finally:
+        csv.field_size_limit(previous_limit)
+
+    with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        classified = list(csv.DictReader(input_file))
+    assert classified[0]["provider_result"] == "x" * 2_048
+
+
 def test_cached_repository_processor_persists_each_file_decision(
     mocker: MockerFixture,
     tmp_path: Path,
