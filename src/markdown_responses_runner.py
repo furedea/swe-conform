@@ -18,6 +18,7 @@ _CHECKPOINT_FILENAME = "responses_checkpoint.jsonl"
 _EXECUTION_FILENAME = "responses_execution.json"
 _COST_FILENAME = "cost_summary.json"
 _RUN_FILENAME = "responses_run.json"
+_CONTENT_POLICY_REJECTION_MARKER = "potentially violating our usage policy"
 
 
 class ResponsesClient(Protocol):
@@ -176,13 +177,20 @@ def _complete_request(
 
 
 def raise_for_fatal_preflight(result: Mapping[str, object]) -> None:
-    """Reject configuration or authentication failures before concurrent execution."""
+    """Reject shared configuration or authentication failures before concurrent execution."""
     error = cast(Mapping[str, object], result.get("error") or {})
     status_code = int(str(error.get("status_code", 0)))
     if status_code not in {400, 401, 403}:
         return
+    if status_code == 400 and _is_content_policy_rejection(error):
+        return
     msg = f"Responses preflight failed: {error.get('message', '')}"
     raise RuntimeError(msg)
+
+
+def _is_content_policy_rejection(error: Mapping[str, object]) -> bool:
+    message = str(error.get("message", "")).casefold()
+    return _CONTENT_POLICY_REJECTION_MARKER in message
 
 
 def _prepared_requests(path: Path) -> dict[str, Mapping[str, object]]:

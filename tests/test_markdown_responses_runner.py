@@ -328,15 +328,25 @@ def test_runner_rejects_a_checkpoint_for_modified_prepared_input(
         )
 
 
-def test_runner_stops_after_one_authentication_failure(
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    (
+        (400, "status=400 body=invalid response schema"),
+        (401, "status=401 body=invalid bearer token"),
+        (403, "status=403 body=access denied"),
+    ),
+)
+def test_runner_stops_after_one_shared_preflight_failure(
     mocker: MockerFixture,
     tmp_path: Path,
+    status_code: int,
+    message: str,
 ) -> None:
     _write_prepared_files(tmp_path)
     client = mocker.Mock()
     client.complete_json.side_effect = openai_responses_client.ResponsesRequestError(
-        "status=401 body=invalid bearer token",
-        status_code=401,
+        message,
+        status_code=status_code,
     )
 
     with pytest.raises(RuntimeError, match="preflight failed"):
@@ -350,7 +360,7 @@ def test_runner_stops_after_one_authentication_failure(
 
     client.complete_json.assert_called_once()
     checkpoint = (tmp_path / "responses_checkpoint.jsonl").read_text(encoding="utf-8")
-    assert "status=401" in checkpoint
+    assert f"status={status_code}" in checkpoint
 
 
 def _write_prepared_files(output_dir: Path) -> None:

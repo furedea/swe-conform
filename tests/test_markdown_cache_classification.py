@@ -684,6 +684,61 @@ def test_cache_classification_stops_after_one_authentication_failure(
     assert rows[0]["status"] == "model_error"
 
 
+def test_cache_classification_continues_after_content_policy_rejection(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    candidate_csv = tmp_path / "markdown_filename_files.csv"
+    output_dir = tmp_path / "classification"
+    _write_candidate_csv(candidate_csv, count=3)
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {
+        "a" * 40: "First.\n",
+        "b" * 40: "Second.\n",
+        "c" * 40: "Third.\n",
+    }
+    policy_rejection = openai_responses_client.ResponsesRequestError(
+        'status=400 body={"error":{"code":"validation_error",'
+        '"message":"Your request was flagged as potentially violating our usage policy."}}',
+        status_code=400,
+    )
+    value = {
+        "label": "NO",
+        "reason": "No project rule exists.",
+        "quote": "",
+        "confidence": 9,
+    }
+    response = openai_responses_client.JsonResponse(
+        value=value,
+        usage=guideline.TokenUsage(input_tokens=100, output_tokens=20, total_tokens=120),
+        document=_response_document(value),
+    )
+    responses_client = mocker.Mock()
+    responses_client.complete_json.side_effect = (policy_rejection, response, response)
+
+    report = markdown_cache_classification.run_cache_classification(
+        candidate_csv=candidate_csv,
+        output_dir=output_dir,
+        repository_client=repository_client,
+        responses_client=responses_client,
+        provider="bedrock",
+        region="us-east-1",
+        model="gpt-5.6-luna",
+        reasoning_effort="max",
+        max_output_tokens=32_000,
+        workers=2,
+        blob_batch_size=64,
+    )
+
+    with (output_dir / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        rows = list(csv.DictReader(input_file))
+    assert [row["status"] for row in rows] == ["model_error", "not_found", "not_found"]
+    assert responses_client.complete_json.call_count == 3
+    assert report["attempted"] == 3
+    assert report["completed"] == 2
+    assert report["errors"] == 1
+
+
 def test_cache_classification_reads_repository_blobs_in_bounded_batches(
     mocker: MockerFixture,
     tmp_path: Path,
