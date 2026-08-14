@@ -166,7 +166,8 @@ def _add_guideline_collection_arguments(
     )
     parser.add_argument("--input-dir", type=Path, default=_DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--cache-root", type=Path, required=True)
+    parser.add_argument("--repository-source", choices=("cache", "github"), default="cache")
+    parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
     parser.add_argument("--exclude-csv", type=Path, action="append", required=True)
     parser.add_argument(

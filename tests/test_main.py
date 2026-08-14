@@ -154,6 +154,25 @@ def test_collect_guideline_repositories_uses_the_fixed_collection_defaults() -> 
     assert len(arguments.exclude_csv) == 2
 
 
+def test_collect_guideline_repositories_accepts_github_without_a_cache_root() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+        ],
+    )
+
+    assert arguments.repository_source == "github"
+    assert arguments.cache_root is None
+
+
 def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     mocker: MockerFixture,
     tmp_path: Path,
