@@ -1,12 +1,39 @@
 """Tests for revision-pinned GitHub API retrieval."""
 
 import base64
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import cast
 from unittest.mock import MagicMock
 
 import httpx
 import pytest_mock
 
 import github_client
+
+
+class ConcurrentHTTPClient:
+    """Record concurrent calls while behaving like a successful HTTP client."""
+
+    def __init__(self) -> None:
+        self.active_requests = 0
+        self.maximum_active_requests = 0
+        self.lock = threading.Lock()
+
+    def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+        with self.lock:
+            self.active_requests += 1
+            self.maximum_active_requests = max(self.maximum_active_requests, self.active_requests)
+        time.sleep(0.02)
+        with self.lock:
+            self.active_requests -= 1
+        response = MagicMock(spec=httpx.Response)
+        response.content = b"content\n"
+        return response
+
+    def close(self) -> None:
+        """Match the httpx client boundary."""
 
 
 def test_client_follows_github_redirects_by_default(
@@ -135,3 +162,133 @@ def test_client_retries_a_transient_network_failure(
     assert content == "Use snake_case.\n"
     assert http_client.get.call_count == 2
     sleep.assert_called_once_with(1.0)
+
+
+def test_client_honors_retry_after_before_retrying_a_rate_limit(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://api.github.com/repos/example/project/git/trees/revision")
+    rate_limited = httpx.Response(403, headers={"retry-after": "7"}, request=request)
+    success = MagicMock(spec=httpx.Response)
+    success.content = b"Use snake_case.\n"
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (rate_limited, success)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "CONTRIBUTING.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    sleep.assert_called_once_with(7.0)
+    assert client.metrics() == github_client.GitHubRequestMetrics(
+        requests=2,
+        rate_limit_wait_seconds=7.0,
+    )
+
+
+def test_client_backs_off_for_a_secondary_rate_limit_without_headers(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://api.github.com/repos/example/project/git/trees/revision")
+    rate_limited = httpx.Response(
+        403,
+        json={"message": "You have exceeded a secondary rate limit."},
+        request=request,
+    )
+    success = httpx.Response(200, content=b"Use snake_case.\n", request=request)
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (rate_limited, success)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "CONTRIBUTING.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    sleep.assert_called_once_with(60.0)
+
+
+def test_client_waits_until_the_primary_rate_limit_resets(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://api.github.com/repos/example/project/git/trees/revision")
+    rate_limited = httpx.Response(
+        403,
+        headers={
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "110",
+        },
+        request=request,
+    )
+    success = MagicMock(spec=httpx.Response)
+    success.content = b"Use snake_case.\n"
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (rate_limited, success)
+    mocker.patch("github_client.time.time", autospec=True, return_value=100.0)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "CONTRIBUTING.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    sleep.assert_called_once_with(11.0)
+
+
+def test_client_waits_before_the_next_request_after_primary_quota_is_exhausted(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://raw.githubusercontent.com/example/project/revision/file.md")
+    exhausted = httpx.Response(
+        200,
+        content=b"first\n",
+        headers={
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "110",
+        },
+        request=request,
+    )
+    success = httpx.Response(200, content=b"second\n", request=request)
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (exhausted, success)
+    mocker.patch("github_client.time.time", autospec=True, return_value=100.0)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    first = client.get_text_file("example/project", "revision", "first.md")
+    second = client.get_text_file("example/project", "revision", "second.md")
+
+    assert (first, second) == ("first\n", "second\n")
+    sleep.assert_called_once_with(11.0)
+
+
+def test_client_serializes_github_requests() -> None:
+    http_client = ConcurrentHTTPClient()
+    client = github_client.GitHubClient(
+        token="test-credential",
+        http_client=cast(httpx.Client, http_client),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = tuple(
+            executor.submit(
+                client.get_text_file,
+                "example/project",
+                "0123456789abcdef",
+                f"docs/{index}.md",
+            )
+            for index in range(2)
+        )
+        assert [future.result() for future in futures] == ["content\n", "content\n"]
+
+    assert http_client.maximum_active_requests == 1

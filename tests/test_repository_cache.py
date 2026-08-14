@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import pytest
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
@@ -22,6 +23,11 @@ def test_cache_fetches_complete_history_and_blobs_for_the_snapshot_revision(
         return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     run = mocker.patch("repository_cache.subprocess.run", autospec=True, side_effect=run_side_effect)
+    mocker.patch(
+        "repository_cache.GitRepositoryCache.inspect_snapshot",
+        autospec=True,
+        return_value=repository_cache.SnapshotInspection(repository_cache.SnapshotState.COMPLETE),
+    )
     cache = repository_cache.GitRepositoryCache(root=tmp_path)
     revision = "0123456789abcdef"
 
@@ -48,6 +54,11 @@ def test_cache_reuses_a_completed_snapshot_without_network_access(
         autospec=True,
         return_value=CompletedProcess(args=[], returncode=0, stdout="true\n", stderr=""),
     )
+    mocker.patch(
+        "repository_cache.GitRepositoryCache.inspect_snapshot",
+        autospec=True,
+        return_value=repository_cache.SnapshotInspection(repository_cache.SnapshotState.COMPLETE),
+    )
     cache = repository_cache.GitRepositoryCache(root=tmp_path)
 
     disposition = cache.ensure_snapshot("example/project", "0123456789abcdef")
@@ -58,6 +69,91 @@ def test_cache_reuses_a_completed_snapshot_without_network_access(
     assert "rev-parse" in commands[0]
     assert "show-ref" in commands[1]
     assert all("fetch" not in command for command in commands)
+
+
+def test_cache_rejects_a_snapshot_with_missing_reachable_objects(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "example" / "project.git"
+    cache_path.mkdir(parents=True)
+    cache = repository_cache.GitRepositoryCache(root=tmp_path)
+    mocker.patch(
+        "repository_cache.GitRepositoryCache.inspect_snapshot",
+        autospec=True,
+        return_value=repository_cache.SnapshotInspection(repository_cache.SnapshotState.SNAPSHOT_INCOMPLETE),
+    )
+    run = mocker.patch(
+        "repository_cache.subprocess.run",
+        autospec=True,
+        return_value=CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(repository_cache.RepositoryCacheError, match="incomplete"):
+        cache.ensure_snapshot("example/project", "0123456789abcdef")
+
+    assert all("fetch" not in call.args[0] for call in run.call_args_list)
+
+
+def test_snapshot_inspection_reports_missing_reachable_objects_as_incomplete(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "example" / "project.git"
+    cache_path.mkdir(parents=True)
+
+    def run_side_effect(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        if "--is-bare-repository" in command:
+            return CompletedProcess(args=command, returncode=0, stdout="true\n", stderr="")
+        if "cat-file" in command:
+            return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        if "rev-list" in command:
+            return CompletedProcess(args=command, returncode=1, stdout="", stderr="missing blob")
+        raise AssertionError(command)
+
+    mocker.patch("repository_cache.subprocess.run", autospec=True, side_effect=run_side_effect)
+    cache = repository_cache.GitRepositoryCache(root=tmp_path)
+
+    inspection = cache.inspect_snapshot("example/project", "0123456789abcdef")
+
+    assert inspection.state is repository_cache.SnapshotState.SNAPSHOT_INCOMPLETE
+    assert inspection.detail == "missing blob"
+
+
+def test_snapshot_inspection_discards_complete_object_listing_output(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "example" / "project.git"
+    cache_path.mkdir(parents=True)
+    run = mocker.patch(
+        "repository_cache.subprocess.run",
+        autospec=True,
+        return_value=CompletedProcess(args=[], returncode=0, stdout="true\n", stderr=""),
+    )
+    cache = repository_cache.GitRepositoryCache(root=tmp_path)
+
+    inspection = cache.inspect_snapshot("example/project", "0123456789abcdef")
+
+    assert inspection.state is repository_cache.SnapshotState.COMPLETE
+    rev_list_call = next(call for call in run.call_args_list if "rev-list" in call.args[0])
+    assert rev_list_call.kwargs["stdout"] is subprocess.DEVNULL
+
+
+def test_snapshot_inspection_detects_a_missing_blob_in_a_real_bare_repository(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    revision = _create_origin(origin)
+    cache = repository_cache.GitRepositoryCache(root=tmp_path / "cache")
+    cache_path = cache.path("example/project")
+    cache_path.parent.mkdir(parents=True)
+    _git("clone", "--bare", "--quiet", str(origin), str(cache_path))
+    blob_sha = _git("--git-dir", str(cache_path), "rev-parse", f"{revision}:source.txt").stdout.strip()
+    blob_path = cache_path / "objects" / blob_sha[:2] / blob_sha[2:]
+    blob_path.unlink()
+
+    inspection = cache.inspect_snapshot("example/project", revision)
+
+    assert inspection.state is repository_cache.SnapshotState.SNAPSHOT_INCOMPLETE
 
 
 def test_cache_repairs_an_empty_directory_before_fetching(
@@ -110,10 +206,12 @@ def test_cache_contains_snapshot_ancestors_but_not_later_descendants(tmp_path: P
 
     cache.ensure_snapshot("example/project", snapshot_revision)
 
+    inspection = cache.inspect_snapshot("example/project", snapshot_revision)
     history_count = _git("--git-dir", str(cache_path), "rev-list", "--count", snapshot_revision)
     later_object = _git("--git-dir", str(cache_path), "cat-file", "-e", later_revision, check=False)
     missing_objects = _git("--git-dir", str(cache_path), "rev-list", "--objects", "--missing=print", snapshot_revision)
     assert history_count.stdout.strip() == "2"
+    assert inspection.state is repository_cache.SnapshotState.COMPLETE
     assert later_object.returncode != 0
     assert not any(line.startswith("?") for line in missing_objects.stdout.splitlines())
 

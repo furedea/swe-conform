@@ -58,6 +58,30 @@ def test_stratified_sample_is_reproducible_and_excludes_prior_repositories() -> 
     assert not excluded.intersection(item.candidate.repository.casefold() for item in first)
 
 
+def test_stratified_schedule_draws_one_repository_from_each_language_per_round() -> None:
+    candidates = tuple(
+        _candidate(language, index) for language in repository_sampling.DEFAULT_LANGUAGES for index in range(4)
+    )
+    excluded = {candidates[0].repository}
+
+    scheduled = repository_sampling.stratified_schedule(
+        tuple(reversed(candidates)),
+        sample_seed=41,
+        excluded_repositories=excluded,
+    )
+
+    assert len(scheduled) == 12
+    assert [item.sample_order for item in scheduled] == list(range(1, 13))
+    assert [item.round_number for item in scheduled[:4]] == [1, 1, 1, 1]
+    assert [item.language for item in scheduled[:4]] == list(repository_sampling.DEFAULT_LANGUAGES)
+    assert not {item.candidate.repository for item in scheduled}.intersection(excluded)
+    assert scheduled == repository_sampling.stratified_schedule(
+        candidates,
+        sample_seed=41,
+        excluded_repositories=excluded,
+    )
+
+
 def test_stratified_sample_rejects_duplicate_repository_sampling_units() -> None:
     candidate = _candidate("Java", 1)
 

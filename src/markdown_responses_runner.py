@@ -18,6 +18,7 @@ _CHECKPOINT_FILENAME = "responses_checkpoint.jsonl"
 _EXECUTION_FILENAME = "responses_execution.json"
 _COST_FILENAME = "cost_summary.json"
 _RUN_FILENAME = "responses_run.json"
+_CONTENT_POLICY_REJECTION_MARKER = "potentially violating our usage policy"
 
 
 class ResponsesClient(Protocol):
@@ -73,14 +74,14 @@ def run_prepared_classification(
     started = time.perf_counter()
     concurrent_pending = pending
     if pending:
-        preflight_result = _execute_request(client, pending[0])
+        preflight_result = execute_request(client, pending[0])
         preflight_id = str(preflight_result["custom_id"])
         _append_checkpoint(checkpoint_path, preflight_result)
         results[preflight_id] = preflight_result
-        _raise_for_fatal_preflight(preflight_result)
+        raise_for_fatal_preflight(preflight_result)
         concurrent_pending = pending[1:]
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_execute_request, client, request): request for request in concurrent_pending}
+        futures = {executor.submit(execute_request, client, request): request for request in concurrent_pending}
         for future in as_completed(futures):
             result = future.result()
             custom_id = str(result["custom_id"])
@@ -122,7 +123,8 @@ def run_prepared_classification(
     return report
 
 
-def _execute_request(client: ResponsesClient, request: Mapping[str, object]) -> Mapping[str, object]:
+def execute_request(client: ResponsesClient, request: Mapping[str, object]) -> Mapping[str, object]:
+    """Execute one provider-neutral request and capture its result or error."""
     custom_id = str(request.get("custom_id", ""))
     started = time.perf_counter()
     try:
@@ -174,13 +176,21 @@ def _complete_request(
     )
 
 
-def _raise_for_fatal_preflight(result: Mapping[str, object]) -> None:
+def raise_for_fatal_preflight(result: Mapping[str, object]) -> None:
+    """Reject shared configuration or authentication failures before concurrent execution."""
     error = cast(Mapping[str, object], result.get("error") or {})
     status_code = int(str(error.get("status_code", 0)))
     if status_code not in {400, 401, 403}:
         return
+    if status_code == 400 and _is_content_policy_rejection(error):
+        return
     msg = f"Responses preflight failed: {error.get('message', '')}"
     raise RuntimeError(msg)
+
+
+def _is_content_policy_rejection(error: Mapping[str, object]) -> bool:
+    message = str(error.get("message", "")).casefold()
+    return _CONTENT_POLICY_REJECTION_MARKER in message
 
 
 def _prepared_requests(path: Path) -> dict[str, Mapping[str, object]]:

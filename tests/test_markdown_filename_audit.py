@@ -10,6 +10,7 @@ from pytest_mock import MockerFixture
 import github_client
 import markdown_filename_audit
 import repository
+import repository_tree
 
 
 def _candidate() -> repository.RepositoryCandidate:
@@ -145,11 +146,15 @@ def test_scan_applies_content_terms_only_after_the_filename_filter(mocker: Mocke
             path="DESIGN.md",
             matched_terms=("design",),
             matched_content_terms=(),
+            blob_sha="blob-design",
+            size_bytes=10,
         ),
         markdown_filename_audit.MarkdownFilenameFile(
             path="README.MD",
             matched_terms=("readme",),
             matched_content_terms=("guideline", "develop"),
+            blob_sha="blob-readme",
+            size_bytes=10,
         ),
     )
     client.get_complete_tree.assert_called_once_with("example/project", "0123456789abcdef")
@@ -180,6 +185,60 @@ def test_scan_excludes_markdown_symlinks(mocker: MockerFixture) -> None:
     )
 
     assert matches == ()
+
+
+def test_scan_records_the_revision_pinned_blob_identity(mocker: MockerFixture) -> None:
+    client = mocker.Mock()
+    client.get_complete_tree.return_value = github_client.RepositoryTree(
+        entries=(github_client.TreeEntry(path="RULES.md", sha="blob-rules", size=42),),
+        truncated=False,
+    )
+    client.get_text_blob.return_value = "Project conventions.\n"
+
+    matches = markdown_filename_audit.scan_github_markdown_filenames(
+        client,
+        "example/project",
+        "0123456789abcdef",
+    )
+
+    assert matches[0].blob_sha == "blob-rules"
+    assert matches[0].size_bytes == 42
+
+
+def test_scan_reads_all_local_candidates_through_one_blob_batch() -> None:
+    class BatchTreeClient:
+        def __init__(self) -> None:
+            self.batch_calls = 0
+
+        def get_complete_tree(self, repository: str, revision: str) -> github_client.RepositoryTree:
+            del repository, revision
+            return github_client.RepositoryTree(
+                entries=(
+                    github_client.TreeEntry(path="CONTRIBUTING.md", sha="blob-contributing", size=10),
+                    github_client.TreeEntry(path="README.md", sha="blob-readme", size=20),
+                ),
+                truncated=False,
+            )
+
+        def get_text_blob(self, repository: str, blob_sha: str) -> str:
+            del repository, blob_sha
+            raise AssertionError("single-blob retrieval must not be used")
+
+        def get_text_blobs(self, repository: str, blob_shas: tuple[str, ...]) -> dict[str, str]:
+            del repository
+            self.batch_calls += 1
+            return dict.fromkeys(blob_shas, "Coding standards.\n")
+
+    client = BatchTreeClient()
+
+    matches = markdown_filename_audit.scan_github_markdown_filenames(
+        client,
+        "example/project",
+        "0123456789abcdef",
+    )
+
+    assert len(matches) == 2
+    assert client.batch_calls == 1
 
 
 def test_scan_ignores_candidate_terms_found_only_in_directory_names(mocker: MockerFixture) -> None:
@@ -281,6 +340,8 @@ def test_auditor_compares_filename_candidates_with_agent_evidence(mocker: Mocker
             path="README.md",
             matched_terms=("readme",),
             matched_content_terms=("standard",),
+            blob_sha="blob-readme",
+            size_bytes=10,
         ),
     )
     assert result.agent_evidence[0].filename_match is True
@@ -300,6 +361,16 @@ def test_auditor_preserves_unevaluated_evidence_after_github_failure(mocker: Moc
 
     assert result.status is markdown_filename_audit.MarkdownFilenameAuditStatus.RETRIEVAL_ERROR
     assert result.agent_evidence[0].filename_match is None
+
+
+def test_auditor_records_a_missing_local_revision_as_a_retrieval_error(mocker: MockerFixture) -> None:
+    client = mocker.Mock()
+    client.get_complete_tree.side_effect = repository_tree.CachedRepositoryTreeError("pinned revision is absent")
+    auditor = markdown_filename_audit.MarkdownFilenameAuditor(client=client, agent_evidence={})
+
+    result = auditor.audit(_candidate())
+
+    assert result.status is markdown_filename_audit.MarkdownFilenameAuditStatus.RETRIEVAL_ERROR
 
 
 def test_audit_runner_uses_the_configured_workers_concurrently(mocker: MockerFixture) -> None:
@@ -368,6 +439,8 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
             "name": "example/project",
             "lastCommitSHA": "0123456789abcdef",
             "markdown_path": "CONTRIBUTING.md",
+            "blob_sha": "",
+            "size_bytes": "0",
             "markdown_url": ("https://github.com/example/project/blob/0123456789abcdef/CONTRIBUTING.md"),
             "matched_filename_terms": "contributing",
             "matched_content_terms": "style|guideline",
@@ -390,3 +463,46 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
     assert summary_rows[0]["markdown_filename_file_count"] == "2"
     assert summary_rows[0]["markdown_filename_and_content_file_count"] == "1"
     assert not (tmp_path / "markdown_term_files.csv").exists()
+
+
+def test_write_reports_lists_skipped_repositories_and_reasons(tmp_path: Path) -> None:
+    results = (
+        markdown_filename_audit.RepositoryMarkdownFilenameAudit(
+            candidate=_indexed_candidate(0),
+            status=markdown_filename_audit.MarkdownFilenameAuditStatus.SNAPSHOT_INCOMPLETE,
+            error="snapshot_incomplete",
+        ),
+        markdown_filename_audit.RepositoryMarkdownFilenameAudit(
+            candidate=_indexed_candidate(1),
+            status=markdown_filename_audit.MarkdownFilenameAuditStatus.EXPLICITLY_EXCLUDED,
+            error="explicitly_excluded",
+        ),
+    )
+    report = markdown_filename_audit.MarkdownFilenameAuditReport(
+        results=results,
+        stats=markdown_filename_audit.MarkdownFilenameAuditStats(
+            requested=2,
+            completed=0,
+            errors=2,
+            elapsed_seconds=0.0,
+        ),
+    )
+
+    markdown_filename_audit.write_reports(report, tmp_path)
+
+    with (tmp_path / "skipped_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        rows = list(csv.DictReader(input_file))
+    assert rows == [
+        {
+            "repository": "example/project-0",
+            "snapshot_sha": f"{1:040x}",
+            "status": "snapshot_incomplete",
+            "reason": "snapshot_incomplete",
+        },
+        {
+            "repository": "example/project-1",
+            "snapshot_sha": f"{2:040x}",
+            "status": "explicitly_excluded",
+            "reason": "explicitly_excluded",
+        },
+    ]

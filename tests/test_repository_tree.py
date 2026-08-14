@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import pytest
 from pytest_mock import MockerFixture
 
 import github_client
@@ -56,6 +57,23 @@ def test_tree_client_reads_text_blobs_from_the_local_cache(
     fallback.get_text_blob.assert_not_called()
 
 
+def test_local_tree_client_reads_multiple_text_blobs_in_one_git_process(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    revision, cache_root = _create_cached_repository(tmp_path)
+    client = repository_tree.LocalRepositoryTreeClient(
+        cache=repository_cache.GitRepositoryCache(root=cache_root),
+    )
+    tree = client.get_complete_tree("example/project", revision)
+    run = mocker.spy(repository_tree.subprocess, "run")
+
+    contents = client.get_text_blobs("example/project", (tree.entries[0].sha,))
+
+    assert contents == {tree.entries[0].sha: "# Example\n"}
+    assert run.call_count == 1
+
+
 def test_tree_client_falls_back_when_the_pinned_revision_is_not_cached(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -73,6 +91,16 @@ def test_tree_client_falls_back_when_the_pinned_revision_is_not_cached(
 
     assert tree is expected
     fallback.get_complete_tree.assert_called_once_with("example/project", "0" * 40)
+
+
+def test_local_tree_client_rejects_a_missing_pinned_revision(tmp_path: Path) -> None:
+    _, cache_root = _create_cached_repository(tmp_path)
+    client = repository_tree.LocalRepositoryTreeClient(
+        cache=repository_cache.GitRepositoryCache(root=cache_root),
+    )
+
+    with pytest.raises(repository_tree.CachedRepositoryTreeError, match="pinned revision is absent"):
+        client.get_complete_tree("example/project", "0" * 40)
 
 
 def test_tree_client_excludes_gitlinks_from_blob_entries(
