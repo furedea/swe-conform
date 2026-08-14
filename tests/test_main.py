@@ -319,6 +319,12 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
     credential = mocker.patch("main.github_credential", autospec=True, return_value="github-credential")
     github = mocker.patch("main.github_client.GitHubClient", autospec=True)
     persistent = mocker.patch("main.github_repository.PersistentGitHubRepositoryClient", autospec=True)
+    persistent.return_value.report_metrics.return_value = {
+        "github_requests": 4,
+        "github_rate_limit_wait_seconds": 0.0,
+        "source_content_downloads": 3,
+        "source_content_cache_hits": 2,
+    }
     mocker.patch("main.markdown_filename_audit.MarkdownFilenameAuditor", autospec=True)
     responses = mocker.patch("main._collection_classification_client", autospec=True).return_value
     processor = mocker.patch("main.guideline_collection.RepositoryFileProcessor", autospec=True).return_value
@@ -350,6 +356,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
     assert collect.call_args.kwargs["processor"] is processor
     assert collect.call_args.kwargs["max_screened_repositories"] == 200
     write_reports.assert_called_once()
+    assert write_reports.call_args.kwargs["source_metrics"] is persistent.return_value.report_metrics
     responses.close.assert_called_once_with()
     github.return_value.close.assert_called_once_with()
     store.initialize.assert_called_once_with()

@@ -2,7 +2,7 @@
 
 import csv
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -33,6 +33,7 @@ def write_collection_reports(
     rejected_repositories: set[str] | None = None,
     max_screened_repositories: int | None = None,
     screening_limit_reached: bool = False,
+    source_metrics: Callable[[], Mapping[str, object]] | None = None,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
     new_target = target_total_repositories - len(baseline_repositories)
@@ -82,6 +83,7 @@ def write_collection_reports(
         unresolved_count=len(unresolved),
         max_screened_repositories=max_screened_repositories,
         screening_limit_reached=screening_limit_reached,
+        source_metrics=source_metrics() if source_metrics is not None else {},
     )
 
 
@@ -205,6 +207,7 @@ def _write_summary(
     unresolved_count: int,
     max_screened_repositories: int | None,
     screening_limit_reached: bool,
+    source_metrics: Mapping[str, object],
 ) -> None:
     new_target = target_total - baseline_count
     _write_json(
@@ -226,6 +229,7 @@ def _write_summary(
             "classified_files": len(file_rows),
             "manual_review_files": sum(row["status"] in {"pass", "review"} for row in selected_file_rows),
             "unresolved_files": unresolved_count,
+            **source_metrics,
         },
     )
 

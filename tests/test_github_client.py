@@ -184,6 +184,10 @@ def test_client_honors_retry_after_before_retrying_a_rate_limit(
 
     assert content == "Use snake_case.\n"
     sleep.assert_called_once_with(7.0)
+    assert client.metrics() == github_client.GitHubRequestMetrics(
+        requests=2,
+        rate_limit_wait_seconds=7.0,
+    )
 
 
 def test_client_waits_until_the_primary_rate_limit_resets(

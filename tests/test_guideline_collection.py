@@ -281,6 +281,14 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
         "a" * 40: "PASS",
         "b" * 40: "REVIEW",
     }
+    source_metrics = mocker.Mock(
+        return_value={
+            "github_requests": 4,
+            "github_rate_limit_wait_seconds": 7.0,
+            "source_content_downloads": 3,
+            "source_content_cache_hits": 2,
+        },
+    )
 
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
@@ -291,6 +299,7 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
         repository_client=repository_client,
         max_screened_repositories=200,
         screening_limit_reached=True,
+        source_metrics=source_metrics,
     )
 
     with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
@@ -303,6 +312,9 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
     assert summary["max_screened_repositories"] == 200
     assert summary["screening_limit_reached"] is True
+    assert summary["github_requests"] == 4
+    assert summary["source_content_cache_hits"] == 2
+    source_metrics.assert_called_once_with()
 
 
 def test_cached_repository_processor_persists_each_file_decision(

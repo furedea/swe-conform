@@ -657,6 +657,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     guideline_collection.validate_manual_review_state(manual_review, store=store)
     repository_sampling.write_stratified_schedule(arguments.output_dir / "sampling_manifest.csv", schedule)
     github: github_client.GitHubClient | None = None
+    github_source: github_repository.PersistentGitHubRepositoryClient | None = None
     if arguments.repository_source == "cache":
         assert arguments.cache_root is not None
         snapshot_inspector: markdown_candidate_extraction.SnapshotInspector | None = (
@@ -672,10 +673,11 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         skip_incomplete_repositories = True
     else:
         github = github_client.GitHubClient(token=github_credential())
-        repository_client = github_repository.PersistentGitHubRepositoryClient(
+        github_source = github_repository.PersistentGitHubRepositoryClient(
             client=github,
             content_root=arguments.output_dir / "source-content",
         )
+        repository_client = github_source
         snapshot_inspector = None
         skip_incomplete_repositories = False
     auditor = markdown_filename_audit.MarkdownFilenameAuditor(client=repository_client, agent_evidence={})
@@ -734,11 +736,13 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             rejected_repositories=manual_review.rejected_repositories,
             max_screened_repositories=arguments.max_screened_repositories,
             screening_limit_reached=report.screening_limit_reached if report is not None else False,
+            source_metrics=github_source.report_metrics if github_source is not None else None,
         )
         responses_client.close()
         if github is not None:
             github.close()
     assert report is not None
+    source_metrics = github_source.report_metrics() if github_source is not None else {}
     payload = {
         "baseline_repositories": report.baseline_repositories,
         "excluded_repositories": len(excluded_repositories),
@@ -754,6 +758,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "target_reached": report.target_reached,
         "human_target_reached": report.human_target_reached,
         "output_dir": str(arguments.output_dir),
+        **source_metrics,
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 

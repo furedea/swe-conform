@@ -38,6 +38,14 @@ class RepositoryTree:
     truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GitHubRequestMetrics:
+    """HTTP request and rate-limit wait totals for one client."""
+
+    requests: int
+    rate_limit_wait_seconds: float
+
+
 class RepositoryDocumentClient(Protocol):
     """Retrieve repository trees and text blobs at pinned revisions."""
 
@@ -53,7 +61,16 @@ class RepositoryDocumentClient(Protocol):
 class GitHubClient:
     """Read public repository data through the GitHub REST API."""
 
-    __slots__ = ("_base_url", "_client", "_headers", "_max_attempts", "_raw_base_url", "_request_lock")
+    __slots__ = (
+        "_base_url",
+        "_client",
+        "_headers",
+        "_max_attempts",
+        "_rate_limit_wait_seconds",
+        "_raw_base_url",
+        "_request_count",
+        "_request_lock",
+    )
 
     def __init__(
         self,
@@ -80,6 +97,8 @@ class GitHubClient:
             follow_redirects=True,
         )
         self._request_lock = threading.Lock()
+        self._request_count = 0
+        self._rate_limit_wait_seconds = 0.0
 
     def get_tree(self, repository: str, revision: str) -> RepositoryTree:
         """Return blob entries from a recursively retrieved Git tree."""
@@ -118,6 +137,14 @@ class GitHubClient:
         """Close the underlying HTTP connection pool."""
         self._client.close()
 
+    def metrics(self) -> GitHubRequestMetrics:
+        """Return completed HTTP request and rate-limit wait totals."""
+        with self._request_lock:
+            return GitHubRequestMetrics(
+                requests=self._request_count,
+                rate_limit_wait_seconds=self._rate_limit_wait_seconds,
+            )
+
     def _get_json(
         self,
         path: str,
@@ -144,6 +171,7 @@ class GitHubClient:
     ) -> httpx.Response:
         for attempt in range(self._max_attempts):
             try:
+                self._request_count += 1
                 response = self._client.get(url, headers=self._headers, params=params)
                 response.raise_for_status()
             except httpx.TransportError as error:
@@ -177,8 +205,7 @@ class GitHubClient:
             or response.headers.get("x-ratelimit-remaining") == "0"
         )
 
-    @staticmethod
-    def _wait_before_retry(attempt: int, *, response: httpx.Response | None = None) -> None:
+    def _wait_before_retry(self, attempt: int, *, response: httpx.Response | None = None) -> None:
         retry_after = response.headers.get("retry-after") if response is not None else None
         try:
             if retry_after is not None:
@@ -189,7 +216,9 @@ class GitHubClient:
                 delay_seconds = float(2**attempt)
         except KeyError, ValueError:
             delay_seconds = float(2**attempt)
-        time.sleep(max(0.0, delay_seconds))
+        bounded_delay_seconds = max(0.0, delay_seconds)
+        self._rate_limit_wait_seconds += bounded_delay_seconds
+        time.sleep(bounded_delay_seconds)
 
     def _get_tree_document(
         self,

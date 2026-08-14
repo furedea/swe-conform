@@ -14,6 +14,10 @@ def test_github_repository_client_reuses_a_downloaded_blob_after_restart(
 ) -> None:
     first_client = mocker.Mock(spec=github_client.GitHubClient)
     first_client.get_text_blob.return_value = "Use ProjectNode in src/nodes/.\n"
+    first_client.metrics.return_value = github_client.GitHubRequestMetrics(
+        requests=3,
+        rate_limit_wait_seconds=7.0,
+    )
     first_source = github_repository.PersistentGitHubRepositoryClient(
         client=first_client,
         content_root=tmp_path,
@@ -32,3 +36,17 @@ def test_github_repository_client_reuses_a_downloaded_blob_after_restart(
     assert resumed_content == first_content
     first_client.get_text_blob.assert_called_once_with("example/project", "a" * 40)
     resumed_client.get_text_blob.assert_not_called()
+    assert first_source.metrics() == github_repository.GitHubContentMetrics(
+        downloads=1,
+        cache_hits=0,
+    )
+    assert resumed_source.metrics() == github_repository.GitHubContentMetrics(
+        downloads=0,
+        cache_hits=1,
+    )
+    assert first_source.report_metrics() == {
+        "github_requests": 3,
+        "github_rate_limit_wait_seconds": 7.0,
+        "source_content_downloads": 1,
+        "source_content_cache_hits": 0,
+    }
