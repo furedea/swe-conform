@@ -44,7 +44,12 @@ def write_collection_reports(
     confirmed_results = tuple(
         result for result in store.results() if result.scheduled.candidate.repository.casefold() in confirmed_names
     )
-    selected = (*confirmed_results, *pending)
+    selected = tuple(
+        sorted(
+            (*confirmed_results, *pending),
+            key=lambda result: result.scheduled.sample_order,
+        ),
+    )
     selected_names = {result.scheduled.candidate.repository.casefold() for result in selected}
     file_rows, file_attempts = _file_records(output_dir, store.results(), selected_names=selected_names)
     _write_csv(output_dir / _CLASSIFIED_FILES_FILENAME, file_rows, fallback_fields=_classified_fields())
@@ -133,8 +138,13 @@ def _collection_file_record(
     }
 
 
-def _file_record_order(row: dict[str, object]) -> tuple[int, str]:
-    return int(str(row["sample_order"])), str(row["markdown_path"]).casefold()
+def _file_record_order(row: dict[str, object]) -> tuple[int, int, str, int]:
+    return (
+        int(str(row["sample_order"])),
+        int(str(row["input_index"])),
+        str(row["markdown_path"]).casefold(),
+        int(str(row["attempt_count"])),
+    )
 
 
 def _write_repository_reports(

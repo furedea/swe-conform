@@ -112,6 +112,84 @@ def test_collection_store_keeps_attempts_and_selects_each_positive_repository_on
     assert len((tmp_path / "repository_attempts.jsonl").read_text(encoding="utf-8").splitlines()) == 3
 
 
+def test_collection_store_recovers_retryable_file_errors_from_existing_checkpoints(tmp_path: Path) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    scheduled = _scheduled_repository("Java", 1)
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="pass",
+            candidate_file_count=1,
+            retryable=False,
+        ),
+    )
+    classification_dir = tmp_path / "repositories" / "00001" / "classification"
+    classification_dir.mkdir(parents=True)
+    error_record = _file_row(scheduled, "docs/retry.md", "a" * 40, "model_error")
+    error_record["retry_exhausted"] = False
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(error_record)}\n",
+        encoding="utf-8",
+    )
+
+    retryable = store.retryable(max_attempts=1)
+
+    assert [result.scheduled.sample_order for result in retryable] == [1]
+
+
+def test_collection_store_does_not_retry_exhausted_file_errors_as_repository_errors(tmp_path: Path) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    scheduled = _scheduled_repository("Java", 1)
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="unresolved",
+            candidate_file_count=1,
+            model_error_count=1,
+            retryable=True,
+        ),
+    )
+    classification_dir = tmp_path / "repositories" / "00001" / "classification"
+    classification_dir.mkdir(parents=True)
+    error_record = _file_row(scheduled, "docs/retry.md", "a" * 40, "model_error")
+    error_record["retry_exhausted"] = True
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(error_record)}\n",
+        encoding="utf-8",
+    )
+
+    retryable = store.retryable(max_attempts=3)
+
+    assert retryable == ()
+
+
+def test_collection_store_retries_snapshot_failures_with_candidates_within_repository_budget(tmp_path: Path) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    scheduled = _scheduled_repository("Java", 1)
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="unresolved",
+            candidate_file_count=1,
+            retryable=True,
+        ),
+    )
+    classification_dir = tmp_path / "repositories" / "00001" / "classification"
+    classification_dir.mkdir(parents=True)
+    snapshot_record = _file_row(scheduled, "docs/rules.md", "a" * 40, "snapshot_incomplete")
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(snapshot_record)}\n",
+        encoding="utf-8",
+    )
+
+    retryable = store.retryable(max_attempts=2)
+
+    assert [result.scheduled.sample_order for result in retryable] == [1]
+
+
 def test_collection_stops_after_the_complete_round_that_reaches_the_new_target(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -216,6 +294,55 @@ def test_collection_retries_unresolved_repositories_before_freezing_selection(
     assert [result.scheduled.sample_order for result in store.selected(1)] == [1]
 
 
+def test_collection_retries_file_errors_before_finishing_a_human_complete_collection(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="pass",
+            candidate_file_count=1,
+            retryable=False,
+        ),
+    )
+    checkpoint_path = tmp_path / "repositories" / "00001" / "classification" / "cache_classification_checkpoint.jsonl"
+    checkpoint_path.parent.mkdir(parents=True)
+    error_record = _file_row(scheduled, "docs/retry.md", "a" * 40, "model_error")
+    error_record["retry_exhausted"] = False
+    checkpoint_path.write_text(f"{json.dumps(error_record)}\n", encoding="utf-8")
+
+    def resolve(item: repository_sampling.ScheduledRepository) -> guideline_collection.RepositoryScreening:
+        resolved_record = _file_row(item, "docs/retry.md", "a" * 40, "not_found")
+        checkpoint_path.write_text(
+            f"{json.dumps(error_record)}\n{json.dumps(resolved_record)}\n",
+            encoding="utf-8",
+        )
+        return guideline_collection.RepositoryScreening(
+            item,
+            status="pass",
+            candidate_file_count=1,
+        )
+
+    processor = mocker.Mock()
+    processor.process.side_effect = resolve
+
+    guideline_collection.collect_repositories(
+        (scheduled,),
+        baseline_repository_count=0,
+        target_total_repositories=1,
+        confirmed_repositories={scheduled.candidate.repository},
+        store=store,
+        processor=processor,
+        workers=1,
+    )
+
+    processor.process.assert_called_once_with(scheduled)
+
+
 def test_repository_screening_uses_the_checkpoint_to_detect_retryable_file_errors(tmp_path: Path) -> None:
     scheduled = _scheduled_repository("Java", 1)
     classification_dir = tmp_path / "classification"
@@ -230,6 +357,38 @@ def test_repository_screening_uses_the_checkpoint_to_detect_retryable_file_error
         "status": "unresolved",
         "candidate_file_count": "1",
         "pass_count": "0",
+        "review_count": "0",
+        "not_found_count": "0",
+        "model_error_count": "1",
+        "retrieval_error_count": "0",
+        "input_too_large_count": "0",
+        "error": "",
+    }
+
+    result = guideline_collection._repository_screening(
+        scheduled,
+        repository_row,
+        classification_dir=classification_dir,
+    )
+
+    assert result.retryable is True
+
+
+def test_positive_repository_screening_retries_unresolved_file_errors(tmp_path: Path) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    classification_dir = tmp_path / "classification"
+    classification_dir.mkdir()
+    pass_record = _file_row(scheduled, "docs/rules.md", "a" * 40, "pass")
+    error_record = _file_row(scheduled, "docs/retry.md", "b" * 40, "model_error")
+    error_record["retry_exhausted"] = False
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(pass_record)}\n{json.dumps(error_record)}\n",
+        encoding="utf-8",
+    )
+    repository_row = {
+        "status": "pass",
+        "candidate_file_count": "2",
+        "pass_count": "1",
         "review_count": "0",
         "not_found_count": "0",
         "model_error_count": "1",
@@ -347,6 +506,81 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     assert summary["github_requests"] == 4
     assert summary["source_content_cache_hits"] == 2
     source_metrics.assert_called_once_with()
+
+
+def test_collection_file_reports_follow_sampling_and_candidate_order(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="pass",
+            candidate_file_count=3,
+            pass_count=3,
+        ),
+    )
+    classification_dir = tmp_path / "repositories" / "00001" / "classification"
+    classification_dir.mkdir(parents=True)
+    rows = [
+        _file_row(scheduled, "docs/z-first.md", "a" * 40, "pass"),
+        _file_row(scheduled, "docs/a-middle.md", "b" * 40, "pass"),
+        _file_row(scheduled, "docs/m-last.md", "c" * 40, "pass"),
+    ]
+    for input_index, row in enumerate(rows):
+        row["input_index"] = input_index
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        "".join(f"{json.dumps(row)}\n" for row in reversed(rows)),
+        encoding="utf-8",
+    )
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {
+        "a" * 40: "FIRST",
+        "b" * 40: "MIDDLE",
+        "c" * 40: "LAST",
+    }
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(scheduled.candidate,),
+        store=store,
+        baseline_repositories=set(),
+        target_total_repositories=1,
+        repository_client=repository_client,
+    )
+
+    with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        paths = [row["markdown_path"] for row in csv.DictReader(input_file)]
+    assert paths == ["docs/z-first.md", "docs/a-middle.md", "docs/m-last.md"]
+
+
+def test_selected_repository_report_keeps_confirmed_and_pending_rows_in_sampling_order(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    first = _scheduled_repository("Java", 1)
+    second = _scheduled_repository("Python", 2)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(first, status="pass"))
+    store.append(guideline_collection.RepositoryScreening(second, status="pass"))
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(first.candidate, second.candidate),
+        store=store,
+        baseline_repositories=set(),
+        target_total_repositories=2,
+        repository_client=mocker.Mock(),
+        confirmed_repositories={second.candidate.repository},
+    )
+
+    with (tmp_path / "selected_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        repositories = [row["repository"] for row in csv.DictReader(input_file)]
+    assert repositories == [first.candidate.repository, second.candidate.repository]
 
 
 def test_collection_reports_rebuild_compact_file_views_from_repository_checkpoints(

@@ -228,8 +228,38 @@ class RepositoryCollectionStore:
         return set(self._results)
 
     def retryable(self, *, max_attempts: int) -> tuple[RepositoryScreening, ...]:
-        """Return unresolved outcomes that remain within the retry budget."""
-        return tuple(result for result in self.results() if result.retryable and result.attempt_count < max_attempts)
+        """Return repository or file outcomes that remain within their retry budget."""
+        return tuple(
+            result for result in self.results() if self._is_retryable(result, max_repository_attempts=max_attempts)
+        )
+
+    def _is_retryable(
+        self,
+        result: RepositoryScreening,
+        *,
+        max_repository_attempts: int,
+    ) -> bool:
+        if self._has_retryable_file_errors(result):
+            return True
+        has_classification_error = bool(
+            result.model_error_count or result.retrieval_error_count or result.input_too_large_count
+        )
+        return (
+            result.status == "unresolved"
+            and not has_classification_error
+            and result.retryable
+            and result.attempt_count < max_repository_attempts
+        )
+
+    def _has_retryable_file_errors(self, result: RepositoryScreening) -> bool:
+        checkpoint_path = (
+            self._output_dir
+            / "repositories"
+            / f"{result.scheduled.sample_order:05d}"
+            / "classification"
+            / "cache_classification_checkpoint.jsonl"
+        )
+        return markdown_cache_results.checkpoint_has_retryable_file_errors(checkpoint_path)
 
     def _validate_or_write_configuration(self) -> None:
         path = self._output_dir / _CONFIGURATION_FILENAME
@@ -367,7 +397,7 @@ def collect_repositories(
             screening_limit_reached = True
             break
         _process_repositories(pending, processor=processor, store=store, workers=workers)
-    while remaining_target:
+    while True:
         retryable = store.retryable(max_attempts=max_repository_attempts)
         if not retryable:
             break
@@ -452,11 +482,8 @@ def _repository_screening(
 ) -> RepositoryScreening:
     source_status = row["status"]
     status = source_status if source_status in {"pass", "not_found", "no_candidates"} else "unresolved"
-    retryable = source_status == "snapshot_incomplete" or (
-        status == "unresolved"
-        and markdown_cache_results.checkpoint_has_retryable_file_errors(
-            classification_dir / "cache_classification_checkpoint.jsonl",
-        )
+    retryable = source_status == "snapshot_incomplete" or markdown_cache_results.checkpoint_has_retryable_file_errors(
+        classification_dir / "cache_classification_checkpoint.jsonl",
     )
     return RepositoryScreening(
         scheduled,

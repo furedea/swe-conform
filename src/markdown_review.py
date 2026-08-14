@@ -30,6 +30,12 @@ _BLIND_CHECKLIST_FIELDS = (
 )
 _MECHANICAL_FILTER_ORIGIN = "mechanical_filter"
 _COLLECTION_ORIGIN = "added"
+_ANNOTATION_FIELDS = (
+    "human_decision",
+    "codex_decision",
+    "codex_reason",
+    "note",
+)
 
 
 class CachedBlobClient(Protocol):
@@ -131,16 +137,16 @@ def export_cached_review_files(
     output_dir: Path,
 ) -> MarkdownReviewReport:
     """Materialize positive file classifications directly from bare Git caches."""
-    selected = sorted(
-        (row for row in classified_rows if row["status"] in {"pass", "review"}),
-        key=lambda row: (str(row["name"]).casefold(), str(row["markdown_path"]).casefold()),
-    )
+    selected = tuple(row for row in classified_rows if row["status"] in {"pass", "review"})
     grouped: defaultdict[str, list[Mapping[str, object]]] = defaultdict(list)
     for row in selected:
         grouped[str(row["name"])].append(row)
     output_dir.mkdir(parents=True, exist_ok=True)
     existing_rows = _existing_collection_checklist(output_dir / "checklist.csv")
     existing_by_url = {row["github_url"]: row for row in existing_rows}
+    annotated_repositories = {
+        row["repository"].casefold() for row in existing_rows if any(row[field] for field in _ANNOTATION_FIELDS)
+    }
     checklist_rows: list[dict[str, str]] = []
     used_filenames = {row["file"].casefold() for row in existing_rows}
     current_urls: set[str] = set()
@@ -176,8 +182,11 @@ def export_cached_review_files(
                     "note": existing["note"] if existing is not None else "",
                 },
             )
-    checklist_rows.extend(row for row in existing_rows if row["github_url"] not in current_urls)
-    checklist_rows.sort(key=lambda row: (row["repository"].casefold(), row["file"].casefold()))
+    checklist_rows.extend(
+        row
+        for row in existing_rows
+        if row["github_url"] not in current_urls and row["repository"].casefold() in annotated_repositories
+    )
     _write_checklist(
         output_dir / "checklist.csv",
         checklist_rows,
