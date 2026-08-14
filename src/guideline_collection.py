@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import markdown_cache_classification
+import markdown_cache_results
 import markdown_candidate_extraction
 import markdown_candidate_store
 import markdown_filename_audit
@@ -452,7 +453,10 @@ def _repository_screening(
     source_status = row["status"]
     status = source_status if source_status in {"pass", "not_found", "no_candidates"} else "unresolved"
     retryable = source_status == "snapshot_incomplete" or (
-        status == "unresolved" and _has_retryable_file(classification_dir / "classified_files.csv")
+        status == "unresolved"
+        and markdown_cache_results.checkpoint_has_retryable_file_errors(
+            classification_dir / "cache_classification_checkpoint.jsonl",
+        )
     )
     return RepositoryScreening(
         scheduled,
@@ -467,14 +471,6 @@ def _repository_screening(
         retryable=retryable,
         error=row["error"],
     )
-
-
-def _has_retryable_file(path: Path) -> bool:
-    with path.open(encoding="utf-8", newline="") as input_file:
-        return any(
-            row["status"] in {"model_error", "retrieval_error"} and row["retry_exhausted"] != "True"
-            for row in csv.DictReader(input_file)
-        )
 
 
 def screening_record(result: RepositoryScreening) -> dict[str, object]:

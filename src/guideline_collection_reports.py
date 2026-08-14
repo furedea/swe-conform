@@ -2,10 +2,8 @@
 
 import csv
 import json
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
 
 import guideline_collection
 import markdown_cache_classification
@@ -99,20 +97,24 @@ def _file_records(
     for result in results:
         scheduled = result.scheduled
         classification_dir = output_dir / "repositories" / f"{scheduled.sample_order:05d}" / "classification"
-        latest_path = classification_dir / "classified_files.csv"
-        if latest_path.exists():
-            latest.extend(
-                _collection_file_record(row, scheduled=scheduled, selected_names=selected_names)
-                for row in _csv_rows(latest_path)
-            )
         checkpoint_path = classification_dir / "cache_classification_checkpoint.jsonl"
-        if checkpoint_path.exists():
-            for line in checkpoint_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    record = cast(dict[str, object], json.loads(line))
-                    attempts.append(
-                        _collection_file_record(record, scheduled=scheduled, selected_names=selected_names)
-                    )
+        checkpoint_attempts = markdown_cache_results.read_checkpoint_attempts(checkpoint_path)
+        if result.candidate_file_count and not checkpoint_attempts:
+            raise FileNotFoundError(f"classification checkpoint is absent or empty: {checkpoint_path}")
+        latest_records = markdown_cache_results.latest_checkpoint_records(checkpoint_attempts)
+        if classification_dir.exists():
+            markdown_cache_results.write_classified_file_report(
+                classification_dir / "classified_files.csv",
+                latest_records,
+            )
+        attempts.extend(
+            _collection_file_record(record, scheduled=scheduled, selected_names=selected_names)
+            for record in checkpoint_attempts
+        )
+        latest.extend(
+            _collection_file_record(record, scheduled=scheduled, selected_names=selected_names)
+            for record in latest_records
+        )
     return sorted(latest, key=_file_record_order), sorted(attempts, key=_file_record_order)
 
 
@@ -127,22 +129,12 @@ def _collection_file_record(
         "round_number": scheduled.round_number,
         "sampling_language": scheduled.language,
         "selected_repository": scheduled.candidate.repository.casefold() in selected_names,
-        **dict(record),
+        **markdown_cache_results.classification_report_record(record),
     }
 
 
 def _file_record_order(row: dict[str, object]) -> tuple[int, str]:
     return int(str(row["sample_order"])), str(row["markdown_path"]).casefold()
-
-
-def _csv_rows(path: Path) -> tuple[dict[str, str], ...]:
-    previous_limit = csv.field_size_limit()
-    csv.field_size_limit(sys.maxsize)
-    try:
-        with path.open(encoding="utf-8", newline="") as input_file:
-            return tuple(dict(row) for row in csv.DictReader(input_file))
-    finally:
-        csv.field_size_limit(previous_limit)
 
 
 def _write_repository_reports(

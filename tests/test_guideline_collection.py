@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
 from pytest_mock import MockerFixture
 
 import guideline
@@ -215,6 +216,37 @@ def test_collection_retries_unresolved_repositories_before_freezing_selection(
     assert [result.scheduled.sample_order for result in store.selected(1)] == [1]
 
 
+def test_repository_screening_uses_the_checkpoint_to_detect_retryable_file_errors(tmp_path: Path) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    classification_dir = tmp_path / "classification"
+    classification_dir.mkdir()
+    record = _file_row(scheduled, "docs/rules.md", "a" * 40, "model_error")
+    record["retry_exhausted"] = False
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(record)}\n",
+        encoding="utf-8",
+    )
+    repository_row = {
+        "status": "unresolved",
+        "candidate_file_count": "1",
+        "pass_count": "0",
+        "review_count": "0",
+        "not_found_count": "0",
+        "model_error_count": "1",
+        "retrieval_error_count": "0",
+        "input_too_large_count": "0",
+        "error": "",
+    }
+
+    result = guideline_collection._repository_screening(
+        scheduled,
+        repository_row,
+        classification_dir=classification_dir,
+    )
+
+    assert result.retryable is True
+
+
 def test_collection_replaces_human_rejected_repositories_from_the_same_schedule(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -317,7 +349,7 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     source_metrics.assert_called_once_with()
 
 
-def test_collection_reports_read_provider_results_larger_than_the_active_csv_limit(
+def test_collection_reports_rebuild_compact_file_views_from_repository_checkpoints(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -330,26 +362,63 @@ def test_collection_reports_read_provider_results_larger_than_the_active_csv_lim
     row = _file_row(scheduled, "docs/rules.md", "a" * 40, "pass")
     row["provider_result"] = "x" * 2_048
     _write_rows(classification_dir / "classified_files.csv", [row])
+    (classification_dir / "cache_classification_checkpoint.jsonl").write_text(
+        f"{json.dumps(row)}\n",
+        encoding="utf-8",
+    )
     repository_client = mocker.Mock()
     repository_client.get_text_blobs.return_value = {"a" * 40: "PASS"}
-    previous_limit = csv.field_size_limit()
-    csv.field_size_limit(1_024)
 
-    try:
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(scheduled.candidate,),
+        store=store,
+        baseline_repositories=set(),
+        target_total_repositories=1,
+        repository_client=repository_client,
+    )
+
+    with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        classified = list(csv.DictReader(input_file))
+    attempts = [
+        json.loads(line) for line in (tmp_path / "file_attempts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    with (classification_dir / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        repository_report = next(csv.DictReader(input_file))
+    with (tmp_path / "manual-review" / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
+        checklist = list(csv.DictReader(input_file))
+    assert classified[0]["markdown_path"] == "docs/rules.md"
+    assert "provider_result" not in classified[0]
+    assert "provider_result" not in attempts[0]
+    assert "provider_result" not in repository_report
+    assert checklist[0]["llm_decision"] == "pass"
+
+
+def test_collection_reports_reject_candidate_repositories_without_a_checkpoint(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(
+        guideline_collection.RepositoryScreening(
+            scheduled,
+            status="pass",
+            candidate_file_count=1,
+            pass_count=1,
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError, match="classification checkpoint is absent or empty"):
         guideline_collection_reports.write_collection_reports(
             output_dir=tmp_path,
             population=(scheduled.candidate,),
             store=store,
             baseline_repositories=set(),
             target_total_repositories=1,
-            repository_client=repository_client,
+            repository_client=mocker.Mock(),
         )
-    finally:
-        csv.field_size_limit(previous_limit)
-
-    with (tmp_path / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
-        classified = list(csv.DictReader(input_file))
-    assert classified[0]["provider_result"] == "x" * 2_048
 
 
 def test_cached_repository_processor_persists_each_file_decision(

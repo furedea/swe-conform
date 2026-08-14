@@ -10,6 +10,7 @@ from pytest_mock import MockerFixture
 
 import guideline
 import markdown_cache_classification
+import markdown_cache_results
 import openai_responses_client
 import repository_cache
 
@@ -60,6 +61,24 @@ def test_cache_classification_judges_one_blob_without_materializing_batch_input(
     assert report["attempted"] == 1
     assert report["completed"] == 1
     assert not (output_dir / "batch_input.jsonl").exists()
+
+
+def test_cache_classification_keeps_raw_provider_responses_only_in_the_checkpoint(tmp_path: Path) -> None:
+    output_dir = tmp_path / "classification"
+    store = markdown_cache_results.CacheClassificationStore(output_dir, configuration={"schema_version": 1})
+    store.initialize()
+    record = _classification_record(provider_result='{"raw":"response"}')
+
+    store.append(record)
+    store.write_reports()
+
+    checkpoint_record = json.loads(
+        (output_dir / "cache_classification_checkpoint.jsonl").read_text(encoding="utf-8"),
+    )
+    with (output_dir / "classified_files.csv").open(encoding="utf-8", newline="") as input_file:
+        report_row = next(csv.DictReader(input_file))
+    assert checkpoint_record["provider_result"] == '{"raw":"response"}'
+    assert "provider_result" not in report_row
 
 
 def test_cache_classification_reports_pass_empty_and_failed_repositories(
@@ -771,6 +790,36 @@ def _write_candidate_csv(path: Path, *, count: int = 1, size_bytes: int = 35) ->
                     "agent_evidence": "False",
                 },
             )
+
+
+def _classification_record(*, provider_result: str) -> dict[str, object]:
+    return {
+        "custom_id": "candidate-1",
+        "input_index": 0,
+        "name": "example/project",
+        "lastCommitSHA": "1" * 40,
+        "markdown_path": "CONTRIBUTING.md",
+        "blob_sha": "a" * 40,
+        "size_bytes": 35,
+        "markdown_url": "https://github.com/example/project/blob/revision/CONTRIBUTING.md",
+        "matched_filename_terms": "contributing",
+        "matched_content_terms": "guideline",
+        "status": "pass",
+        "model_label": "YES",
+        "model_reason": "A project rule exists.",
+        "quote": "Use ProjectNode in src/nodes/.",
+        "confidence": 9,
+        "reason": "verified_quote",
+        "input_tokens": 100,
+        "uncached_input_tokens": 100,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "cost_usd": 0.1,
+        "elapsed_seconds": 1.0,
+        "provider_result": provider_result,
+    }
 
 
 def _write_repository_summary(path: Path) -> None:

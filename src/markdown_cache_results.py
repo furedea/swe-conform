@@ -50,7 +50,6 @@ _CLASSIFIED_FIELDS = (
     "total_tokens",
     "cost_usd",
     "elapsed_seconds",
-    "provider_result",
 )
 _REPOSITORY_FIELDS = (
     "name",
@@ -78,6 +77,62 @@ _SKIPPED_REPOSITORY_FIELDS = (
 def classified_fields() -> tuple[str, ...]:
     """Return the stable per-file classification report columns."""
     return _CLASSIFIED_FIELDS
+
+
+def classification_report_record(record: Mapping[str, object]) -> dict[str, object]:
+    """Project one checkpoint record onto the compact report schema."""
+    return {field: record[field] for field in _CLASSIFIED_FIELDS}
+
+
+def write_classified_file_report(path: Path, records: Sequence[Mapping[str, object]]) -> None:
+    """Write the compact latest-result CSV derived from checkpoint records."""
+    _write_csv(
+        path,
+        tuple(classification_report_record(record) for record in records),
+        fieldnames=_CLASSIFIED_FIELDS,
+    )
+
+
+def read_checkpoint_attempts(path: Path) -> tuple[dict[str, object], ...]:
+    """Read every complete attempt from an append-only classification checkpoint."""
+    if not path.exists():
+        return ()
+    records: list[dict[str, object]] = []
+    with path.open(encoding="utf-8") as input_file:
+        pending = input_file.readline()
+        for line in input_file:
+            if pending.strip():
+                records.append(cast(dict[str, object], json.loads(pending)))
+            pending = line
+    if pending.strip():
+        try:
+            records.append(cast(dict[str, object], json.loads(pending)))
+        except json.JSONDecodeError:
+            pass
+    return tuple(records)
+
+
+def latest_checkpoint_records(
+    attempts: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    """Return the latest checkpoint attempt for each file in report order."""
+    latest: dict[str, Mapping[str, object]] = {}
+    for record in attempts:
+        latest[str(record["custom_id"])] = record
+    return tuple(
+        sorted(
+            latest.values(),
+            key=lambda record: (int(str(record["input_index"])), str(record["markdown_path"])),
+        ),
+    )
+
+
+def checkpoint_has_retryable_file_errors(path: Path) -> bool:
+    """Return whether a checkpoint has a latest model or retrieval error within budget."""
+    return any(
+        record["status"] in {"model_error", "retrieval_error"} and not bool(record["retry_exhausted"])
+        for record in latest_checkpoint_records(read_checkpoint_attempts(path))
+    )
 
 
 class CacheClassificationStore:
@@ -146,10 +201,9 @@ class CacheClassificationStore:
     def write_reports(self) -> dict[str, object]:
         """Materialize deterministic file and cost reports from checkpoint records."""
         records = self.records()
-        _write_csv(
+        write_classified_file_report(
             self._output_dir / _CLASSIFIED_FILES_FILENAME,
             records,
-            fieldnames=_CLASSIFIED_FIELDS,
         )
         report = _cost_report(records)
         _write_json(self._output_dir / _COST_FILENAME, report)
@@ -167,17 +221,8 @@ class CacheClassificationStore:
 
     def _load_records(self) -> dict[str, dict[str, object]]:
         path = self._output_dir / _CHECKPOINT_FILENAME
-        if not path.exists():
-            return {}
         records: dict[str, dict[str, object]] = {}
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for line_number, line in enumerate(lines, start=1):
-            try:
-                record = cast(dict[str, object], json.loads(line))
-            except json.JSONDecodeError:
-                if line_number == len(lines):
-                    break
-                raise
+        for record in read_checkpoint_attempts(path):
             custom_id = str(record["custom_id"])
             records[custom_id] = self._attempt_record(record, previous=records.get(custom_id))
         return records
