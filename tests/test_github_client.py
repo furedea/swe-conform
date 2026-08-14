@@ -190,6 +190,31 @@ def test_client_honors_retry_after_before_retrying_a_rate_limit(
     )
 
 
+def test_client_backs_off_for_a_secondary_rate_limit_without_headers(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://api.github.com/repos/example/project/git/trees/revision")
+    rate_limited = httpx.Response(
+        403,
+        json={"message": "You have exceeded a secondary rate limit."},
+        request=request,
+    )
+    success = httpx.Response(200, content=b"Use snake_case.\n", request=request)
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (rate_limited, success)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    content = client.get_text_file(
+        "example/project",
+        "0123456789abcdef",
+        "CONTRIBUTING.md",
+    )
+
+    assert content == "Use snake_case.\n"
+    sleep.assert_called_once_with(60.0)
+
+
 def test_client_waits_until_the_primary_rate_limit_resets(
     mocker: pytest_mock.MockerFixture,
 ) -> None:

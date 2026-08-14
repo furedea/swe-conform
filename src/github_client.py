@@ -207,6 +207,7 @@ class GitHubClient:
             or response.status_code >= 500
             or "retry-after" in response.headers
             or response.headers.get("x-ratelimit-remaining") == "0"
+            or GitHubClient._is_secondary_rate_limit(response)
         )
 
     def _wait_before_retry(self, attempt: int, *, response: httpx.Response | None = None) -> None:
@@ -216,6 +217,8 @@ class GitHubClient:
                 delay_seconds = float(retry_after)
             elif response is not None and response.headers.get("x-ratelimit-remaining") == "0":
                 delay_seconds = float(response.headers["x-ratelimit-reset"]) - time.time() + 1.0
+            elif response is not None and self._is_secondary_rate_limit(response):
+                delay_seconds = float(60 * 2**attempt)
             else:
                 delay_seconds = float(2**attempt)
         except KeyError, ValueError:
@@ -232,7 +235,13 @@ class GitHubClient:
             response.status_code == 429
             or "retry-after" in response.headers
             or response.headers.get("x-ratelimit-remaining") == "0"
+            or GitHubClient._is_secondary_rate_limit(response)
         )
+
+    @staticmethod
+    def _is_secondary_rate_limit(response: httpx.Response) -> bool:
+        body = response.text.casefold()
+        return response.status_code == 403 and ("secondary rate limit" in body or "abuse detection mechanism" in body)
 
     def _remember_primary_rate_limit(self, response: httpx.Response) -> None:
         headers = getattr(response, "headers", {})
