@@ -220,6 +220,33 @@ def test_client_waits_until_the_primary_rate_limit_resets(
     sleep.assert_called_once_with(11.0)
 
 
+def test_client_waits_before_the_next_request_after_primary_quota_is_exhausted(
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    request = httpx.Request("GET", "https://raw.githubusercontent.com/example/project/revision/file.md")
+    exhausted = httpx.Response(
+        200,
+        content=b"first\n",
+        headers={
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "110",
+        },
+        request=request,
+    )
+    success = httpx.Response(200, content=b"second\n", request=request)
+    http_client = MagicMock(spec=httpx.Client)
+    http_client.get.side_effect = (exhausted, success)
+    mocker.patch("github_client.time.time", autospec=True, return_value=100.0)
+    sleep = mocker.patch("github_client.time.sleep", autospec=True)
+    client = github_client.GitHubClient(token="test-credential", http_client=http_client)
+
+    first = client.get_text_file("example/project", "revision", "first.md")
+    second = client.get_text_file("example/project", "revision", "second.md")
+
+    assert (first, second) == ("first\n", "second\n")
+    sleep.assert_called_once_with(11.0)
+
+
 def test_client_serializes_github_requests() -> None:
     http_client = ConcurrentHTTPClient()
     client = github_client.GitHubClient(

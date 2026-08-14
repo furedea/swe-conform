@@ -66,6 +66,7 @@ class GitHubClient:
         "_client",
         "_headers",
         "_max_attempts",
+        "_primary_rate_limit_reset_at",
         "_rate_limit_wait_seconds",
         "_raw_base_url",
         "_request_count",
@@ -99,6 +100,7 @@ class GitHubClient:
         self._request_lock = threading.Lock()
         self._request_count = 0
         self._rate_limit_wait_seconds = 0.0
+        self._primary_rate_limit_reset_at: float | None = None
 
     def get_tree(self, repository: str, revision: str) -> RepositoryTree:
         """Return blob entries from a recursively retrieved Git tree."""
@@ -171,8 +173,10 @@ class GitHubClient:
     ) -> httpx.Response:
         for attempt in range(self._max_attempts):
             try:
+                self._wait_for_primary_rate_limit()
                 self._request_count += 1
                 response = self._client.get(url, headers=self._headers, params=params)
+                self._remember_primary_rate_limit(response)
                 response.raise_for_status()
             except httpx.TransportError as error:
                 if self._should_retry(attempt):
@@ -216,8 +220,39 @@ class GitHubClient:
                 delay_seconds = float(2**attempt)
         except KeyError, ValueError:
             delay_seconds = float(2**attempt)
+        self._primary_rate_limit_reset_at = None
+        self._sleep(
+            delay_seconds,
+            count_as_rate_limit=response is not None and self._is_rate_limited_response(response),
+        )
+
+    @staticmethod
+    def _is_rate_limited_response(response: httpx.Response) -> bool:
+        return (
+            response.status_code == 429
+            or "retry-after" in response.headers
+            or response.headers.get("x-ratelimit-remaining") == "0"
+        )
+
+    def _remember_primary_rate_limit(self, response: httpx.Response) -> None:
+        headers = getattr(response, "headers", {})
+        if headers.get("x-ratelimit-remaining") != "0":
+            return
+        try:
+            self._primary_rate_limit_reset_at = float(headers["x-ratelimit-reset"])
+        except KeyError, ValueError:
+            self._primary_rate_limit_reset_at = None
+
+    def _wait_for_primary_rate_limit(self) -> None:
+        reset_at = self._primary_rate_limit_reset_at
+        self._primary_rate_limit_reset_at = None
+        if reset_at is not None:
+            self._sleep(reset_at - time.time() + 1.0, count_as_rate_limit=True)
+
+    def _sleep(self, delay_seconds: float, *, count_as_rate_limit: bool) -> None:
         bounded_delay_seconds = max(0.0, delay_seconds)
-        self._rate_limit_wait_seconds += bounded_delay_seconds
+        if count_as_rate_limit:
+            self._rate_limit_wait_seconds += bounded_delay_seconds
         time.sleep(bounded_delay_seconds)
 
     def _get_tree_document(
