@@ -1,6 +1,7 @@
 """Minimal GitHub API client for revision-pinned repository documents."""
 
 import base64
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -52,7 +53,7 @@ class RepositoryDocumentClient(Protocol):
 class GitHubClient:
     """Read public repository data through the GitHub REST API."""
 
-    __slots__ = ("_base_url", "_client", "_headers", "_max_attempts", "_raw_base_url")
+    __slots__ = ("_base_url", "_client", "_headers", "_max_attempts", "_raw_base_url", "_request_lock")
 
     def __init__(
         self,
@@ -78,6 +79,7 @@ class GitHubClient:
             timeout=_DEFAULT_TIMEOUT_SECONDS,
             follow_redirects=True,
         )
+        self._request_lock = threading.Lock()
 
     def get_tree(self, repository: str, revision: str) -> RepositoryTree:
         """Return blob entries from a recursively retrieved Git tree."""
@@ -131,6 +133,15 @@ class GitHubClient:
         *,
         params: Mapping[str, str] | None = None,
     ) -> httpx.Response:
+        with self._request_lock:
+            return self._get_response_serialized(url, params=params)
+
+    def _get_response_serialized(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
         for attempt in range(self._max_attempts):
             try:
                 response = self._client.get(url, headers=self._headers, params=params)
@@ -143,8 +154,8 @@ class GitHubClient:
                 raise GitHubRetrievalError(msg) from error
             except httpx.HTTPStatusError as error:
                 failed_response = error.response
-                if self._is_retryable_status(failed_response.status_code) and self._should_retry(attempt):
-                    self._wait_before_retry(attempt)
+                if self._is_retryable_response(failed_response) and self._should_retry(attempt):
+                    self._wait_before_retry(attempt, response=failed_response)
                     continue
                 body = failed_response.text[:_ERROR_BODY_LIMIT]
                 msg = f"GitHub request failed: status={failed_response.status_code} body={body}"
@@ -158,12 +169,27 @@ class GitHubClient:
         return attempt + 1 < self._max_attempts
 
     @staticmethod
-    def _is_retryable_status(status_code: int) -> bool:
-        return status_code in _RETRYABLE_STATUS_CODES or status_code >= 500
+    def _is_retryable_response(response: httpx.Response) -> bool:
+        return (
+            response.status_code in _RETRYABLE_STATUS_CODES
+            or response.status_code >= 500
+            or "retry-after" in response.headers
+            or response.headers.get("x-ratelimit-remaining") == "0"
+        )
 
     @staticmethod
-    def _wait_before_retry(attempt: int) -> None:
-        time.sleep(float(2**attempt))
+    def _wait_before_retry(attempt: int, *, response: httpx.Response | None = None) -> None:
+        retry_after = response.headers.get("retry-after") if response is not None else None
+        try:
+            if retry_after is not None:
+                delay_seconds = float(retry_after)
+            elif response is not None and response.headers.get("x-ratelimit-remaining") == "0":
+                delay_seconds = float(response.headers["x-ratelimit-reset"]) - time.time() + 1.0
+            else:
+                delay_seconds = float(2**attempt)
+        except KeyError, ValueError:
+            delay_seconds = float(2**attempt)
+        time.sleep(max(0.0, delay_seconds))
 
     def _get_tree_document(
         self,
