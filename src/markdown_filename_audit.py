@@ -1,6 +1,7 @@
 """Audit Markdown files with sequential filename and content-term filters."""
 
 import csv
+import hashlib
 import re
 import time
 from collections.abc import Mapping, Sequence
@@ -12,6 +13,7 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import quote
 
 import github_client
+import markdown_deduplication
 import repository
 import repository_tree
 
@@ -50,6 +52,7 @@ _FILENAME_FILE_FIELDS = (
     "lastCommitSHA",
     "markdown_path",
     "blob_sha",
+    "content_sha256",
     "size_bytes",
     "markdown_url",
     "matched_filename_terms",
@@ -85,6 +88,12 @@ _SKIPPED_REPOSITORY_FIELDS = (
     "snapshot_sha",
     "status",
     "reason",
+)
+_EXACT_DEDUPLICATION_OUTPUT_FILES = markdown_deduplication.ExactDeduplicationOutputFiles(
+    deduplicated="markdown_unique_files.csv",
+    occurrences="markdown_exact_duplicate_occurrences.csv",
+    conflicts="markdown_exact_decision_conflicts.csv",
+    summary="markdown_exact_deduplication_summary.json",
 )
 
 
@@ -128,6 +137,7 @@ class MarkdownFilenameFile:
     matched_content_terms: tuple[str, ...]
     blob_sha: str = ""
     size_bytes: int = 0
+    content_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +316,7 @@ def _filename_file(entry: github_client.TreeEntry, content: str) -> MarkdownFile
         matched_content_terms=matched_content_terms(content),
         blob_sha=entry.sha,
         size_bytes=entry.size,
+        content_sha256=hashlib.sha256(content.encode()).hexdigest(),
     )
 
 
@@ -335,10 +346,16 @@ def compare_agent_evidence(
 def write_reports(report: MarkdownFilenameAuditReport, output_dir: Path) -> None:
     """Write independent filename candidate and evidence coverage CSVs."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_csv = output_dir / "markdown_filename_files.csv"
     _write_csv(
-        output_dir / "markdown_filename_files.csv",
+        candidate_csv,
         _filename_file_rows(report.results),
         fieldnames=_FILENAME_FILE_FIELDS,
+    )
+    markdown_deduplication.write_exact_deduplication(
+        input_csv=candidate_csv,
+        output_dir=output_dir,
+        output_files=_EXACT_DEDUPLICATION_OUTPUT_FILES,
     )
     _write_csv(
         output_dir / "agent_evidence_filename_coverage.csv",
@@ -381,6 +398,7 @@ def _filename_file_row(
         "lastCommitSHA": candidate.revision,
         "markdown_path": match.path,
         "blob_sha": match.blob_sha,
+        "content_sha256": match.content_sha256,
         "size_bytes": match.size_bytes,
         "markdown_url": _github_file_url(candidate, match.path),
         "matched_filename_terms": "|".join(match.matched_terms),

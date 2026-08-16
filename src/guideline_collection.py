@@ -152,7 +152,7 @@ class RepositoryFileProcessor:
             )
         classification_dir = repository_dir / "classification"
         markdown_cache_classification.run_cache_classification(
-            candidate_csv=candidate_dir / "markdown_filename_files.csv",
+            candidate_csv=candidate_dir / "markdown_unique_files.csv",
             repository_summary_csv=candidate_dir / "repository_filename_summary.csv",
             output_dir=classification_dir,
             repository_client=self.repository_client,

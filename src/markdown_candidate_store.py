@@ -113,6 +113,7 @@ def _record(result: markdown_filename_audit.RepositoryMarkdownFilenameAudit) -> 
                 "matched_content_terms": list(item.matched_content_terms),
                 "blob_sha": item.blob_sha,
                 "size_bytes": item.size_bytes,
+                "content_sha256": item.content_sha256,
             }
             for item in result.filename_files
         ],
@@ -150,6 +151,7 @@ def _result(record: Mapping[str, object]) -> markdown_filename_audit.RepositoryM
                 matched_content_terms=tuple(str(value) for value in cast(list[object], item["matched_content_terms"])),
                 blob_sha=str(item["blob_sha"]),
                 size_bytes=int(str(item["size_bytes"])),
+                content_sha256=str(item.get("content_sha256", "")),
             )
             for item in cast(list[Mapping[str, object]], record["filename_files"])
         ),

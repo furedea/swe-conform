@@ -671,6 +671,15 @@ def test_cached_repository_processor_persists_each_file_decision(
                 matched_content_terms=("rule",),
                 blob_sha="a" * 40,
                 size_bytes=20,
+                content_sha256="b" * 64,
+            ),
+            markdown_filename_audit.MarkdownFilenameFile(
+                path="docs/z-rules.md",
+                matched_terms=("rules",),
+                matched_content_terms=("rule",),
+                blob_sha="a" * 40,
+                size_bytes=20,
+                content_sha256="b" * 64,
             ),
         ),
     )
@@ -721,6 +730,7 @@ def test_cached_repository_processor_persists_each_file_decision(
         rows = list(csv.DictReader(input_file))
     assert rows[0]["markdown_path"] == "docs/rules.md"
     assert rows[0]["status"] == "pass"
+    assert responses_client.complete_json.call_count == 1
 
 
 def _write_checklist(path: Path, rows: list[dict[str, str]]) -> None:
