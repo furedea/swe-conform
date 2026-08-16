@@ -148,6 +148,7 @@ def test_scan_applies_content_terms_only_after_the_filename_filter(mocker: Mocke
             matched_content_terms=(),
             blob_sha="blob-design",
             size_bytes=10,
+            content_sha256="3d4890567bc085bcc53e1d12f8da25b5f372916efc816b1041f4d00c5048d863",
         ),
         markdown_filename_audit.MarkdownFilenameFile(
             path="README.MD",
@@ -155,6 +156,7 @@ def test_scan_applies_content_terms_only_after_the_filename_filter(mocker: Mocke
             matched_content_terms=("guideline", "develop"),
             blob_sha="blob-readme",
             size_bytes=10,
+            content_sha256="3ea193149fa024720bfdd9b1265ae509cafc17149a3693d87cc4e06629a52d34",
         ),
     )
     client.get_complete_tree.assert_called_once_with("example/project", "0123456789abcdef")
@@ -342,6 +344,7 @@ def test_auditor_compares_filename_candidates_with_agent_evidence(mocker: Mocker
             matched_content_terms=("standard",),
             blob_sha="blob-readme",
             size_bytes=10,
+            content_sha256="3e304dbd4ad8617c5fd9d9fb735d9e1a73159ea0573698202ccb68ab3be65f03",
         ),
     )
     assert result.agent_evidence[0].filename_match is True
@@ -402,6 +405,7 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
                 path="CONTRIBUTING.md",
                 matched_terms=("contributing",),
                 matched_content_terms=("style", "guideline"),
+                content_sha256="a" * 64,
             ),
             markdown_filename_audit.MarkdownFilenameFile(
                 path="DESIGN.md",
@@ -440,6 +444,7 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
             "lastCommitSHA": "0123456789abcdef",
             "markdown_path": "CONTRIBUTING.md",
             "blob_sha": "",
+            "content_sha256": "a" * 64,
             "size_bytes": "0",
             "markdown_url": ("https://github.com/example/project/blob/0123456789abcdef/CONTRIBUTING.md"),
             "matched_filename_terms": "contributing",
@@ -463,6 +468,51 @@ def test_write_reports_keeps_filename_results_separate_from_content_results(tmp_
     assert summary_rows[0]["markdown_filename_file_count"] == "2"
     assert summary_rows[0]["markdown_filename_and_content_file_count"] == "1"
     assert not (tmp_path / "markdown_term_files.csv").exists()
+
+
+def test_write_reports_aggregates_exact_content_after_sequential_filters(tmp_path: Path) -> None:
+    result = markdown_filename_audit.RepositoryMarkdownFilenameAudit(
+        candidate=_candidate(),
+        status=markdown_filename_audit.MarkdownFilenameAuditStatus.COMPLETED,
+        filename_files=(
+            markdown_filename_audit.MarkdownFilenameFile(
+                path="CLAUDE.md",
+                matched_terms=("claude",),
+                matched_content_terms=("rule",),
+                content_sha256="a" * 64,
+            ),
+            markdown_filename_audit.MarkdownFilenameFile(
+                path="AGENTS.md",
+                matched_terms=("agents",),
+                matched_content_terms=("rule",),
+                content_sha256="a" * 64,
+            ),
+        ),
+    )
+    report = markdown_filename_audit.MarkdownFilenameAuditReport(
+        results=(result,),
+        stats=markdown_filename_audit.MarkdownFilenameAuditStats(
+            requested=1,
+            completed=1,
+            errors=0,
+            elapsed_seconds=1.0,
+        ),
+    )
+
+    markdown_filename_audit.write_reports(report, tmp_path)
+
+    with (tmp_path / "markdown_filename_files.csv").open(encoding="utf-8", newline="") as input_file:
+        raw_rows = list(csv.DictReader(input_file))
+    with (tmp_path / "markdown_unique_files.csv").open(encoding="utf-8", newline="") as input_file:
+        unique_rows = list(csv.DictReader(input_file))
+    with (tmp_path / "markdown_exact_duplicate_occurrences.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as input_file:
+        occurrence_rows = list(csv.DictReader(input_file))
+    assert len(raw_rows) == 2
+    assert [row["markdown_path"] for row in unique_rows] == ["AGENTS.md"]
+    assert [row["markdown_path"] for row in occurrence_rows] == ["AGENTS.md", "CLAUDE.md"]
 
 
 def test_write_reports_lists_skipped_repositories_and_reasons(tmp_path: Path) -> None:

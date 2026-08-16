@@ -1,5 +1,6 @@
 """Tests for resumable Markdown candidate extraction results."""
 
+import json
 from pathlib import Path
 
 import markdown_candidate_store
@@ -21,6 +22,26 @@ def test_candidate_store_resumes_only_completed_repository_audits(tmp_path: Path
 
     assert resumed.completed_repositories() == {("example/project-0", f"{1:040x}")}
     assert resumed.report().results == (completed, failed)
+
+
+def test_candidate_store_resumes_checkpoints_without_content_sha256(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    completed = _result(0, status=markdown_filename_audit.MarkdownFilenameAuditStatus.COMPLETED)
+    store = markdown_candidate_store.MarkdownCandidateStore(output_dir, configuration={"cache_only": True})
+    store.initialize()
+    store.append(completed)
+    checkpoint_path = output_dir / "candidate_extraction_checkpoint.jsonl"
+    record = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    del record["filename_files"][0]["content_sha256"]
+    checkpoint_path.write_text(f"{json.dumps(record)}\n", encoding="utf-8")
+
+    resumed = markdown_candidate_store.MarkdownCandidateStore(
+        output_dir,
+        configuration={"cache_only": True},
+    )
+    resumed.initialize()
+
+    assert resumed.report().results[0].filename_files[0].content_sha256 == ""
 
 
 def _result(
@@ -47,6 +68,7 @@ def _result(
             matched_content_terms=("guideline",),
             blob_sha=f"{index + 11:040x}",
             size_bytes=42,
+            content_sha256=f"{index + 21:064x}",
         ),
     )
     return markdown_filename_audit.RepositoryMarkdownFilenameAudit(

@@ -30,6 +30,8 @@ def write_collection_reports(
     repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
+    review_checklist_path: Path | None = None,
+    review_output_checklist_path: Path | None = None,
     max_screened_repositories: int | None = None,
     screening_limit_reached: bool = False,
     source_metrics: Callable[[], Mapping[str, object]] | None = None,
@@ -73,6 +75,8 @@ def write_collection_reports(
         classified_rows=selected_file_rows,
         repository_client=repository_client,
         output_dir=output_dir / "manual-review",
+        existing_checklist_path=review_checklist_path,
+        checklist_path=review_output_checklist_path,
     )
     _write_summary(
         output_dir=output_dir,

@@ -82,6 +82,7 @@ def test_build_full_checklist_preserves_existing_labels_and_marks_added_codex_la
                 "github_url": "https://example.test/AGENTS.md",
                 "llm_decision": "pass",
                 "human_decision": "pass",
+                "duplicate_of": "example--project/CANONICAL.md",
                 "codex_decision": "pass",
                 "codex_reason": "Existing reason",
                 "note": "Existing note",
@@ -126,6 +127,7 @@ def test_build_full_checklist_preserves_existing_labels_and_marks_added_codex_la
     assert rows[0]["review_origin"] == "existing_166"
     assert rows[0]["llm_decision"] == "not_found"
     assert rows[0]["human_decision"] == "pass"
+    assert rows[0]["duplicate_of"] == "example--project/CANONICAL.md"
     assert rows[0]["codex_reason"] == "Existing reason"
     assert rows[1]["review_origin"] == "codex_added_561"
     assert rows[1]["llm_decision"] == "pass"

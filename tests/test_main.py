@@ -9,6 +9,7 @@ from pytest_mock import MockerFixture
 import batch_runner
 import cache_runner
 import codex_cli_client
+import guideline_review
 import main
 import markdown_audit
 import markdown_batch
@@ -54,6 +55,131 @@ def test_sample_repositories_defaults_to_a_fifty_repository_held_out_sample() ->
     assert arguments.sample_size == 50
     assert arguments.sample_seed == 20260807
     assert arguments.exclude_csv == [Path("experiments/calibration/input/candidates.csv")]
+
+
+def test_apply_guideline_checklist_writes_validated_review_outputs(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    apply_checklist = mocker.patch(
+        "main.guideline_review.apply_guideline_checklist",
+        autospec=True,
+        return_value=guideline_review.GuidelineReviewReport(
+            input_files=391,
+            accepted_files=120,
+            duplicate_files=4,
+            not_found_files=267,
+            reviewed_repositories=86,
+            accepted_repositories=80,
+            rejected_repositories=6,
+            output_dir=Path("experiments/collection/manual-review/applied-round-1"),
+        ),
+    )
+
+    main.main(
+        [
+            "apply-guideline-checklist",
+            "--checklist-csv",
+            "experiments/collection/manual-review/checklist_done.csv",
+            "--output-dir",
+            "experiments/collection/manual-review/applied-round-1",
+        ],
+    )
+
+    apply_checklist.assert_called_once_with(
+        checklist_path=Path("experiments/collection/manual-review/checklist_done.csv"),
+        output_dir=Path("experiments/collection/manual-review/applied-round-1"),
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "accepted_files": 120,
+        "accepted_repositories": 80,
+        "duplicate_files": 4,
+        "input_files": 391,
+        "not_found_files": 267,
+        "output_dir": "experiments/collection/manual-review/applied-round-1",
+        "rejected_repositories": 6,
+        "reviewed_repositories": 86,
+    }
+
+
+def test_finalize_guideline_collection_accepts_all_review_sources() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "finalize-guideline-collection",
+            "--collection-dir",
+            "experiments/collection",
+            "--baseline-checklist",
+            "experiments/baseline-1/checklist.csv",
+            "--baseline-checklist",
+            "experiments/baseline-2/checklist.csv",
+            "--human-checklist",
+            "experiments/collection/manual-review/checklist.csv",
+            "--output-dir",
+            "experiments/collection/final",
+        ],
+    )
+
+    assert arguments.collection_dir == Path("experiments/collection")
+    assert arguments.baseline_checklist == [
+        Path("experiments/baseline-1/checklist.csv"),
+        Path("experiments/baseline-2/checklist.csv"),
+    ]
+    assert arguments.human_checklist == Path("experiments/collection/manual-review/checklist.csv")
+    assert arguments.output_dir == Path("experiments/collection/final")
+
+
+def test_finalize_guideline_collection_prints_validated_counts(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    finalize = mocker.patch(
+        "main.guideline_finalization.finalize_guideline_collection",
+        autospec=True,
+        return_value=main.guideline_finalization.GuidelineFinalizationReport(
+            repositories=120,
+            guideline_files=454,
+            baseline_repositories=34,
+            new_repositories=86,
+            baseline_guideline_files=111,
+            new_guideline_files=343,
+            output_dir=Path("experiments/collection/final"),
+        ),
+    )
+
+    main.main(
+        [
+            "finalize-guideline-collection",
+            "--collection-dir",
+            "experiments/collection",
+            "--baseline-checklist",
+            "experiments/baseline-1/checklist.csv",
+            "--baseline-checklist",
+            "experiments/baseline-2/checklist.csv",
+            "--human-checklist",
+            "experiments/collection/manual-review/checklist.csv",
+            "--output-dir",
+            "experiments/collection/final",
+        ],
+    )
+
+    finalize.assert_called_once_with(
+        collection_dir=Path("experiments/collection"),
+        baseline_checklist_paths=(
+            Path("experiments/baseline-1/checklist.csv"),
+            Path("experiments/baseline-2/checklist.csv"),
+        ),
+        human_checklist_path=Path("experiments/collection/manual-review/checklist.csv"),
+        output_dir=Path("experiments/collection/final"),
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "baseline_guideline_files": 111,
+        "baseline_repositories": 34,
+        "guideline_files": 454,
+        "new_guideline_files": 343,
+        "new_repositories": 86,
+        "output_dir": "experiments/collection/final",
+        "repositories": 120,
+    }
 
 
 def test_batch_markdown_prepare_defaults_to_a_twenty_file_luna_pilot() -> None:
@@ -193,6 +319,30 @@ def test_collect_guideline_repositories_accepts_a_screening_cost_limit() -> None
     assert arguments.max_screened_repositories == 200
 
 
+def test_collect_guideline_repositories_accepts_a_separate_next_round_checklist() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+            "--human-checklist",
+            "output/guideline-collection/manual-review/checklist_done.csv",
+            "--review-output-checklist",
+            "output/guideline-collection/manual-review/checklist_round_2.csv",
+        ],
+    )
+
+    assert arguments.review_output_checklist == Path(
+        "output/guideline-collection/manual-review/checklist_round_2.csv",
+    )
+
+
 def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -210,6 +360,10 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             str(tmp_path / "baseline.csv"),
             "--exclude-csv",
             str(tmp_path / "excluded.csv"),
+            "--human-checklist",
+            str(tmp_path / "checklist_done.csv"),
+            "--review-output-checklist",
+            str(tmp_path / "checklist_round_2.csv"),
         ],
     )
     candidate = mocker.Mock(repository="new/project", revision="a" * 40)
@@ -266,6 +420,8 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     validate_review.assert_called_once_with(main.guideline_collection.ManualReviewState(set(), set()), store=store)
     collect.assert_called_once()
     write_reports.assert_called_once()
+    assert write_reports.call_args.kwargs["review_checklist_path"] == tmp_path / "checklist_done.csv"
+    assert write_reports.call_args.kwargs["review_output_checklist_path"] == tmp_path / "checklist_round_2.csv"
     client.close.assert_called_once_with()
 
 
