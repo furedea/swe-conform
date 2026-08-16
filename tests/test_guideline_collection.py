@@ -42,6 +42,30 @@ def test_load_baseline_repositories_counts_each_repository_with_a_human_pass_onc
     assert repositories == {"example/one", "example/three"}
 
 
+def test_load_baseline_repositories_ignores_duplicate_human_passes(tmp_path: Path) -> None:
+    checklist = tmp_path / "checklist.csv"
+    with checklist.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=("repository", "human_decision", "duplicate_of"),
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {"repository": "example/canonical", "human_decision": "pass", "duplicate_of": ""},
+                {
+                    "repository": "example/duplicate-only",
+                    "human_decision": "pass",
+                    "duplicate_of": "canonical.md",
+                },
+            ],
+        )
+
+    repositories = guideline_collection.load_baseline_repositories((checklist,))
+
+    assert repositories == {"example/canonical"}
+
+
 def test_baseline_repositories_must_be_part_of_the_prior_sample_exclusions() -> None:
     try:
         guideline_collection.validate_baseline_exclusions(
@@ -57,21 +81,29 @@ def test_baseline_repositories_must_be_part_of_the_prior_sample_exclusions() -> 
 def test_manual_review_state_confirms_or_rejects_repositories_by_file_decisions(tmp_path: Path) -> None:
     checklist = tmp_path / "checklist.csv"
     with checklist.open("w", encoding="utf-8", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=("repository", "human_decision"))
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=("repository", "file", "github_url", "human_decision", "duplicate_of"),
+        )
         writer.writeheader()
         writer.writerows(
             [
-                {"repository": "example/pass", "human_decision": "not_found"},
-                {"repository": "example/pass", "human_decision": "pass"},
-                {"repository": "example/rejected", "human_decision": "not_found"},
-                {"repository": "example/pending", "human_decision": ""},
+                _manual_review_row("example/pass", "rejected.md", "not_found"),
+                _manual_review_row("example/pass", "canonical.md", "pass"),
+                _manual_review_row("example/rejected", "guide.md", "not_found"),
+                _manual_review_row(
+                    "example/duplicate-only",
+                    "translation.md",
+                    "pass",
+                    duplicate_of="canonical.md",
+                ),
             ],
         )
 
     state = guideline_collection.load_manual_review_state(checklist)
 
     assert state.confirmed_repositories == {"example/pass"}
-    assert state.rejected_repositories == {"example/rejected"}
+    assert state.rejected_repositories == {"example/duplicate-only", "example/rejected"}
 
 
 def test_manual_review_repositories_must_have_a_persisted_positive_screening(tmp_path: Path) -> None:
@@ -655,6 +687,40 @@ def test_collection_reports_reject_candidate_repositories_without_a_checkpoint(
         )
 
 
+def test_collection_reports_use_the_completed_checklist_as_the_next_round_source(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    completed_checklist = tmp_path / "manual-review" / "checklist_done.csv"
+    next_checklist = tmp_path / "manual-review" / "checklist_round_2.csv"
+    export = mocker.patch(
+        "guideline_collection_reports.markdown_review.export_cached_review_files",
+        autospec=True,
+    )
+    repository_client = mocker.Mock()
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(),
+        store=store,
+        baseline_repositories=set(),
+        target_total_repositories=0,
+        repository_client=repository_client,
+        review_checklist_path=completed_checklist,
+        review_output_checklist_path=next_checklist,
+    )
+
+    export.assert_called_once_with(
+        classified_rows=(),
+        repository_client=repository_client,
+        output_dir=tmp_path / "manual-review",
+        existing_checklist_path=completed_checklist,
+        checklist_path=next_checklist,
+    )
+
+
 def test_cached_repository_processor_persists_each_file_decision(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -738,6 +804,22 @@ def _write_checklist(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(output_file, fieldnames=("repository", "human_decision"))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _manual_review_row(
+    repository_name: str,
+    file: str,
+    human_decision: str,
+    *,
+    duplicate_of: str = "",
+) -> dict[str, str]:
+    return {
+        "repository": repository_name,
+        "file": file,
+        "github_url": f"https://example.test/{file}",
+        "human_decision": human_decision,
+        "duplicate_of": duplicate_of,
+    }
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:

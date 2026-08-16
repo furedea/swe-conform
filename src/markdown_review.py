@@ -15,6 +15,7 @@ _CHECKLIST_FIELDS = (
     "github_url",
     "llm_decision",
     "human_decision",
+    "duplicate_of",
     "note",
 )
 _BLIND_CHECKLIST_FIELDS = (
@@ -24,14 +25,17 @@ _BLIND_CHECKLIST_FIELDS = (
     "review_origin",
     "llm_decision",
     "human_decision",
+    "duplicate_of",
     "codex_decision",
     "codex_reason",
     "note",
 )
+_LEGACY_BLIND_CHECKLIST_FIELDS = tuple(field for field in _BLIND_CHECKLIST_FIELDS if field != "duplicate_of")
 _MECHANICAL_FILTER_ORIGIN = "mechanical_filter"
-_COLLECTION_ORIGIN = "added"
+_COLLECTION_ORIGIN_PATTERN = re.compile(r"added_round_([1-9][0-9]*)")
 _ANNOTATION_FIELDS = (
     "human_decision",
+    "duplicate_of",
     "codex_decision",
     "codex_reason",
     "note",
@@ -84,6 +88,7 @@ def export_candidate_files(
                 "review_origin": _MECHANICAL_FILTER_ORIGIN,
                 "llm_decision": "",
                 "human_decision": "",
+                "duplicate_of": "",
                 "codex_decision": "",
                 "codex_reason": "",
                 "note": "",
@@ -123,6 +128,7 @@ def export_pass_files(
                 "github_url": row["markdown_url"],
                 "llm_decision": row["status"],
                 "human_decision": "",
+                "duplicate_of": "",
                 "note": "",
             },
         )
@@ -135,6 +141,8 @@ def export_cached_review_files(
     classified_rows: Sequence[Mapping[str, object]],
     repository_client: CachedBlobClient,
     output_dir: Path,
+    existing_checklist_path: Path | None = None,
+    checklist_path: Path | None = None,
 ) -> MarkdownReviewReport:
     """Materialize positive file classifications directly from bare Git caches."""
     selected = tuple(row for row in classified_rows if row["status"] in {"pass", "review"})
@@ -142,14 +150,18 @@ def export_cached_review_files(
     for row in selected:
         grouped[str(row["name"])].append(row)
     output_dir.mkdir(parents=True, exist_ok=True)
-    existing_rows = _existing_collection_checklist(output_dir / "checklist.csv")
+    default_checklist_path = output_dir / "checklist.csv"
+    existing_rows = _existing_collection_checklist(existing_checklist_path or default_checklist_path)
+    collection_origin = _collection_origin(
+        existing_rows,
+        starts_next_round=existing_checklist_path is not None,
+    )
     existing_by_url = {row["github_url"]: row for row in existing_rows}
     annotated_repositories = {
         row["repository"].casefold() for row in existing_rows if any(row[field] for field in _ANNOTATION_FIELDS)
     }
-    checklist_rows: list[dict[str, str]] = []
+    current_rows: list[dict[str, str]] = []
     used_filenames = {row["file"].casefold() for row in existing_rows}
-    current_urls: set[str] = set()
     for repository, rows in grouped.items():
         blob_shas = tuple(dict.fromkeys(str(row["blob_sha"]) for row in rows))
         contents = repository_client.get_text_blobs(repository, blob_shas)
@@ -168,31 +180,61 @@ def export_cached_review_files(
             local_path = output_dir / local_file
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text(contents[blob_sha], encoding="utf-8")
-            current_urls.add(github_url)
-            checklist_rows.append(
+            current_rows.append(
                 {
                     "repository": repository,
                     "file": local_file,
                     "github_url": github_url,
-                    "review_origin": existing["review_origin"] if existing is not None else _COLLECTION_ORIGIN,
+                    "review_origin": existing["review_origin"] if existing is not None else collection_origin,
                     "llm_decision": string_row["status"],
                     "human_decision": existing["human_decision"] if existing is not None else "",
+                    "duplicate_of": existing["duplicate_of"] if existing is not None else "",
                     "codex_decision": existing["codex_decision"] if existing is not None else "",
                     "codex_reason": existing["codex_reason"] if existing is not None else "",
                     "note": existing["note"] if existing is not None else "",
                 },
             )
-    checklist_rows.extend(
-        row
-        for row in existing_rows
-        if row["github_url"] not in current_urls and row["repository"].casefold() in annotated_repositories
-    )
-    _write_checklist(
-        output_dir / "checklist.csv",
-        checklist_rows,
-        fieldnames=_BLIND_CHECKLIST_FIELDS,
-    )
+    checklist_rows = _merge_collection_checklist(existing_rows, current_rows, annotated_repositories)
+    output_checklist_path = checklist_path or default_checklist_path
+    output_checklist_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_checklist(output_checklist_path, checklist_rows, fieldnames=_BLIND_CHECKLIST_FIELDS)
     return MarkdownReviewReport(files=len(checklist_rows), output_dir=output_dir)
+
+
+def _collection_origin(
+    existing_rows: Sequence[Mapping[str, str]],
+    *,
+    starts_next_round: bool,
+) -> str:
+    round_numbers = [
+        round_number for row in existing_rows if (round_number := _collection_round(row["review_origin"])) is not None
+    ]
+    round_number = max(round_numbers, default=1)
+    if starts_next_round:
+        round_number += 1
+    return f"added_round_{round_number}"
+
+
+def _collection_round(origin: str) -> int | None:
+    match = _COLLECTION_ORIGIN_PATTERN.fullmatch(origin)
+    return int(match.group(1)) if match is not None else None
+
+
+def _merge_collection_checklist(
+    existing_rows: list[dict[str, str]],
+    current_rows: list[dict[str, str]],
+    annotated_repositories: set[str],
+) -> list[dict[str, str]]:
+    current_by_url = {row["github_url"]: row for row in current_rows}
+    merged: list[dict[str, str]] = []
+    for existing in existing_rows:
+        current = current_by_url.pop(existing["github_url"], None)
+        if current is not None:
+            merged.append(current)
+        elif existing["repository"].casefold() in annotated_repositories:
+            merged.append(existing)
+    merged.extend(row for row in current_rows if row["github_url"] in current_by_url)
+    return merged
 
 
 def _existing_collection_checklist(path: Path) -> list[dict[str, str]]:
@@ -200,9 +242,14 @@ def _existing_collection_checklist(path: Path) -> list[dict[str, str]]:
         return []
     with path.open(encoding="utf-8", newline="") as input_file:
         reader = csv.DictReader(input_file)
-        if tuple(reader.fieldnames or ()) != _BLIND_CHECKLIST_FIELDS:
+        fieldnames = tuple(reader.fieldnames or ())
+        if fieldnames not in {_BLIND_CHECKLIST_FIELDS, _LEGACY_BLIND_CHECKLIST_FIELDS}:
             raise ValueError(f"Existing collection checklist has unexpected columns: {path}")
-        return [dict(row) for row in reader]
+        rows = [dict(row) for row in reader]
+    if fieldnames == _LEGACY_BLIND_CHECKLIST_FIELDS:
+        for row in rows:
+            row["duplicate_of"] = ""
+    return rows
 
 
 def _review_rows(path: Path) -> tuple[dict[str, str], ...]:

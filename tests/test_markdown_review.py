@@ -30,7 +30,10 @@ def test_candidate_review_export_writes_a_blinded_checklist_for_each_materialize
     assert report.files == 1
     assert review_path.read_text(encoding="utf-8") == "REVIEW content"
     with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
-        rows = list(csv.DictReader(input_file))
+        reader = csv.DictReader(input_file)
+        rows = list(reader)
+    assert reader.fieldnames is not None
+    assert reader.fieldnames[5:8] == ["human_decision", "duplicate_of", "codex_decision"]
     assert rows == [
         {
             "repository": "example/project",
@@ -39,6 +42,7 @@ def test_candidate_review_export_writes_a_blinded_checklist_for_each_materialize
             "review_origin": "mechanical_filter",
             "llm_decision": "",
             "human_decision": "",
+            "duplicate_of": "",
             "codex_decision": "",
             "codex_reason": "",
             "note": "",
@@ -220,7 +224,10 @@ def test_manual_review_export_writes_the_human_decision_checklist(tmp_path: Path
     )
 
     with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
-        rows = list(csv.DictReader(input_file))
+        reader = csv.DictReader(input_file)
+        rows = list(reader)
+    assert reader.fieldnames is not None
+    assert reader.fieldnames[4:7] == ["human_decision", "duplicate_of", "note"]
     assert rows == [
         {
             "repository": "example/project",
@@ -228,6 +235,7 @@ def test_manual_review_export_writes_the_human_decision_checklist(tmp_path: Path
             "github_url": "https://example.test/candidate-0001.md",
             "llm_decision": "review",
             "human_decision": "",
+            "duplicate_of": "",
             "note": "",
         },
     ]
@@ -303,10 +311,10 @@ def test_cached_review_export_writes_pass_and_review_files_from_bare_git(
     with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
         checklist = list(csv.DictReader(input_file))
     assert [row["llm_decision"] for row in checklist] == ["pass", "review"]
-    assert all(row["review_origin"] == "added" for row in checklist)
+    assert all(row["review_origin"] == "added_round_1" for row in checklist)
 
 
-def test_cached_review_export_preserves_existing_human_decisions(
+def test_cached_review_export_preserves_existing_annotations(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -327,6 +335,7 @@ def test_cached_review_export_preserves_existing_human_decisions(
     with checklist_path.open(encoding="utf-8", newline="") as input_file:
         existing = list(csv.DictReader(input_file))
     existing[0]["human_decision"] = "pass"
+    existing[0]["duplicate_of"] = "example--project/docs__canonical.md"
     existing[0]["codex_decision"] = "pass"
     existing[0]["codex_reason"] = "Evidence remains valid."
     existing[0]["note"] = "checked"
@@ -344,12 +353,205 @@ def test_cached_review_export_preserves_existing_human_decisions(
     with checklist_path.open(encoding="utf-8", newline="") as input_file:
         preserved = list(csv.DictReader(input_file))
     assert preserved[0]["human_decision"] == "pass"
+    assert preserved[0]["duplicate_of"] == "example--project/docs__canonical.md"
     assert preserved[0]["codex_decision"] == "pass"
     assert preserved[0]["codex_reason"] == "Evidence remains valid."
     assert preserved[0]["note"] == "checked"
 
 
-def test_cached_review_export_inserts_retried_files_in_candidate_order(
+def test_cached_review_export_writes_a_separate_next_round_checklist(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    row = {
+        **_classified_row("candidate-0001", "pass", "", markdown_path="docs/rules.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "b" * 40,
+    }
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"b" * 40: "PASS content"}
+    output_dir = tmp_path / "manual-review"
+    output_dir.mkdir()
+    completed_path = output_dir / "checklist_done.csv"
+    completed_row = {
+        "repository": "example/project",
+        "file": "example--project/docs__rules.md",
+        "github_url": "https://example.test/candidate-0001.md",
+        "review_origin": "added_round_1",
+        "llm_decision": "pass",
+        "human_decision": "pass",
+        "duplicate_of": "",
+        "codex_decision": "",
+        "codex_reason": "",
+        "note": "reviewed",
+    }
+    with completed_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=tuple(completed_row))
+        writer.writeheader()
+        writer.writerow(completed_row)
+    completed_contents = completed_path.read_bytes()
+    next_path = output_dir / "checklist_round_2.csv"
+
+    markdown_review.export_cached_review_files(
+        classified_rows=(row,),
+        repository_client=repository_client,
+        output_dir=output_dir,
+        existing_checklist_path=completed_path,
+        checklist_path=next_path,
+    )
+
+    assert completed_path.read_bytes() == completed_contents
+    with next_path.open(encoding="utf-8", newline="") as input_file:
+        next_rows = list(csv.DictReader(input_file))
+    assert next_rows[0]["human_decision"] == "pass"
+    assert next_rows[0]["note"] == "reviewed"
+
+
+def test_cached_review_export_assigns_the_second_round_only_to_new_files(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    existing_row = {
+        **_classified_row("candidate-existing", "pass", "", markdown_path="docs/existing.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "b" * 40,
+    }
+    new_row = {
+        **_classified_row("candidate-new", "pass", "", markdown_path="docs/new.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "c" * 40,
+    }
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {
+        "b" * 40: "EXISTING content",
+        "c" * 40: "NEW content",
+    }
+    output_dir = tmp_path / "manual-review"
+    output_dir.mkdir()
+    completed_path = output_dir / "checklist_done.csv"
+    completed_row = {
+        "repository": "example/project",
+        "file": "example--project/docs__existing.md",
+        "github_url": "https://example.test/candidate-existing.md",
+        "review_origin": "added_round_1",
+        "llm_decision": "pass",
+        "human_decision": "pass",
+        "duplicate_of": "",
+        "codex_decision": "",
+        "codex_reason": "",
+        "note": "",
+    }
+    with completed_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=tuple(completed_row))
+        writer.writeheader()
+        writer.writerow(completed_row)
+
+    markdown_review.export_cached_review_files(
+        classified_rows=(existing_row, new_row),
+        repository_client=repository_client,
+        output_dir=output_dir,
+        existing_checklist_path=completed_path,
+        checklist_path=output_dir / "checklist_round_2.csv",
+    )
+
+    with (output_dir / "checklist_round_2.csv").open(encoding="utf-8", newline="") as input_file:
+        origins = [row["review_origin"] for row in csv.DictReader(input_file)]
+    assert origins == ["added_round_1", "added_round_2"]
+
+
+def test_cached_review_export_assigns_the_round_after_the_latest_existing_origin(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    new_row = {
+        **_classified_row("candidate-new", "pass", "", markdown_path="docs/new.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "c" * 40,
+    }
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"c" * 40: "NEW content"}
+    output_dir = tmp_path / "manual-review"
+    output_dir.mkdir()
+    completed_path = output_dir / "checklist_round_2_done.csv"
+    completed_rows = [
+        {
+            "repository": "example/project",
+            "file": f"example--project/docs__round_{round_number}.md",
+            "github_url": f"https://example.test/candidate-round-{round_number}.md",
+            "review_origin": review_origin,
+            "llm_decision": "pass",
+            "human_decision": "pass",
+            "duplicate_of": "",
+            "codex_decision": "",
+            "codex_reason": "",
+            "note": "",
+        }
+        for round_number, review_origin in ((1, "added_round_1"), (2, "added_round_2"))
+    ]
+    with completed_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=tuple(completed_rows[0]))
+        writer.writeheader()
+        writer.writerows(completed_rows)
+
+    markdown_review.export_cached_review_files(
+        classified_rows=(new_row,),
+        repository_client=repository_client,
+        output_dir=output_dir,
+        existing_checklist_path=completed_path,
+        checklist_path=output_dir / "checklist_round_3.csv",
+    )
+
+    with (output_dir / "checklist_round_3.csv").open(encoding="utf-8", newline="") as input_file:
+        origins = [row["review_origin"] for row in csv.DictReader(input_file)]
+    assert origins == ["added_round_1", "added_round_2", "added_round_3"]
+
+
+def test_cached_review_export_upgrades_a_checklist_without_duplicate_reference(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    row = {
+        **_classified_row("candidate-0001", "pass", "", markdown_path="docs/rules.md"),
+        "lastCommitSHA": "a" * 40,
+        "blob_sha": "b" * 40,
+    }
+    repository_client = mocker.Mock()
+    repository_client.get_text_blobs.return_value = {"b" * 40: "PASS content"}
+    output_dir = tmp_path / "manual-review"
+    output_dir.mkdir()
+    checklist_path = output_dir / "checklist.csv"
+    legacy_row = {
+        "repository": "example/project",
+        "file": "example--project/docs__rules.md",
+        "github_url": "https://example.test/candidate-0001.md",
+        "review_origin": "added_round_1",
+        "llm_decision": "pass",
+        "human_decision": "pass",
+        "codex_decision": "",
+        "codex_reason": "",
+        "note": "",
+    }
+    with checklist_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=tuple(legacy_row))
+        writer.writeheader()
+        writer.writerow(legacy_row)
+
+    markdown_review.export_cached_review_files(
+        classified_rows=(row,),
+        repository_client=repository_client,
+        output_dir=output_dir,
+    )
+
+    with checklist_path.open(encoding="utf-8", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        upgraded = list(reader)
+    assert reader.fieldnames is not None
+    assert reader.fieldnames[5:8] == ["human_decision", "duplicate_of", "codex_decision"]
+    assert upgraded[0]["human_decision"] == "pass"
+    assert upgraded[0]["duplicate_of"] == ""
+
+
+def test_cached_review_export_appends_new_files_after_existing_rows(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -387,8 +589,8 @@ def test_cached_review_export_inserts_retried_files_in_candidate_order(
         urls = [row["github_url"] for row in csv.DictReader(input_file)]
     assert urls == [
         "https://example.test/candidate-first.md",
-        "https://example.test/candidate-middle.md",
         "https://example.test/candidate-last.md",
+        "https://example.test/candidate-middle.md",
     ]
 
 
@@ -430,13 +632,14 @@ def test_cached_review_export_removes_unreviewed_files_displaced_from_selection(
 
     with (output_dir / "checklist.csv").open(encoding="utf-8", newline="") as input_file:
         repositories = [row["repository"] for row in csv.DictReader(input_file)]
-    assert repositories == ["example/one", "example/two"]
+    assert set(repositories) == {"example/one", "example/two"}
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     (
         ("human_decision", "pass"),
+        ("duplicate_of", "example--project/docs__canonical.md"),
         ("codex_decision", "pass"),
         ("codex_reason", "Evidence remains valid."),
         ("note", "review started"),

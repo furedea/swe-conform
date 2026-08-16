@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
+import guideline_review
 import markdown_cache_classification
 import markdown_cache_results
 import markdown_candidate_extraction
@@ -86,12 +87,7 @@ class RepositoryCollectionReport:
     screening_limit_reached: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class ManualReviewState:
-    """Repository outcomes derived from completed file-level human decisions."""
-
-    confirmed_repositories: set[str]
-    rejected_repositories: set[str]
+ManualReviewState = guideline_review.GuidelineReviewState
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,6 +296,7 @@ def load_baseline_repositories(paths: Sequence[Path]) -> set[str]:
                 row["repository"].strip()
                 for row in reader
                 if row["human_decision"].strip() == "pass" and row["repository"].strip()
+                if not row.get("duplicate_of", "").strip()
             )
     return repositories
 
@@ -317,29 +314,8 @@ def validate_baseline_exclusions(
 
 
 def load_manual_review_state(path: Path | None) -> ManualReviewState:
-    """Aggregate file-level human decisions without treating blanks as negative."""
-    if path is None:
-        return ManualReviewState(set(), set())
-    decisions: defaultdict[str, list[str]] = defaultdict(list)
-    with path.open(encoding="utf-8", newline="") as input_file:
-        reader = csv.DictReader(input_file)
-        fields = set(reader.fieldnames or ())
-        if not {"repository", "human_decision"}.issubset(fields):
-            raise ValueError(f"manual checklist must contain repository and human_decision columns: {path}")
-        for row in reader:
-            repository_name = row["repository"].strip()
-            decision = row["human_decision"].strip()
-            if decision not in {"", "pass", "not_found"}:
-                raise ValueError(f"invalid human_decision for {repository_name}: {decision}")
-            if repository_name:
-                decisions[repository_name].append(decision)
-    confirmed = {name for name, values in decisions.items() if "pass" in values}
-    rejected = {
-        name
-        for name, values in decisions.items()
-        if name not in confirmed and values and all(value == "not_found" for value in values)
-    }
-    return ManualReviewState(confirmed, rejected)
+    """Aggregate completed file-level human decisions."""
+    return guideline_review.load_completed_review_state(path)
 
 
 def validate_manual_review_state(
