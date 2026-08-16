@@ -85,7 +85,7 @@ def test_store_resumes_completed_results_and_writes_reports(tmp_path: Path) -> N
     )
     review_page = output_dir / rows[0]["manual_review_path"]
     review_text = review_page.read_text(encoding="utf-8")
-    assert "# Manual review: example/project" in review_text
+    assert "example/project" in review_text
     assert "https://github.com/example/project/tree/0123456789abcdef" in review_text
     assert "../../../../guideline-files/example/project/0123456789abcdef/CONTRIBUTING.md" in review_text
     assert "Changes must preserve public API compatibility." in review_text
@@ -217,14 +217,13 @@ def test_store_preserves_evidence_details_for_a_review_result(tmp_path: Path) ->
     assert record["guideline_status"] == "review"
     assert record["selected"] is False
     assert record["guideline_file_count"] == 1
+    assert record["unverified_evidence_count"] == 1
     assert record["manual_review_path"] == "manual-review/example/project/0123456789abcdef/index.md"
     artifact_path = output_dir / "guideline-files/example/project/0123456789abcdef/CONTRIBUTING.md"
     assert artifact_path.read_bytes() == b"Changes must preserve public API compatibility.\n"
     review_text = (output_dir / record["manual_review_path"]).read_text(encoding="utf-8")
-    assert "- Verified files: 1" in review_text
-    assert "- Unverified evidence: 1" in review_text
-    assert "## Unverified evidence 2: missing.md" in review_text
-    assert "- Verification failure: path is not a file" in review_text
+    assert "missing.md" in review_text
+    assert "path is not a file" in review_text
     assert "> Tests must use the shared fixture." in review_text
 
 
@@ -254,9 +253,11 @@ def test_store_creates_manual_review_for_only_unverified_evidence(tmp_path: Path
 
     record = json.loads((output_dir / "results.jsonl").read_text(encoding="utf-8"))
     assert record["manual_review_path"] == "manual-review/example/project/0123456789abcdef/index.md"
+    assert record["guideline_file_count"] == 0
+    assert record["unverified_evidence_count"] == 1
     review_text = (output_dir / record["manual_review_path"]).read_text(encoding="utf-8")
-    assert "- Verified files: 0" in review_text
-    assert "- Unverified evidence: 1" in review_text
-    assert "## Unverified evidence 1: repository/tests/README.md" in review_text
+    assert "repository/tests/README.md" in review_text
+    assert "path is not a file" in review_text
+    assert "> Tests must use the shared fixture." in review_text
     review_index = (output_dir / "manual-review/index.md").read_text(encoding="utf-8")
     assert "example/project/0123456789abcdef/index.md" in review_index

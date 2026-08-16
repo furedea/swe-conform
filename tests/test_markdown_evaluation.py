@@ -134,7 +134,8 @@ def test_evaluation_uses_repository_csv_for_input_scope(tmp_path: Path) -> None:
     assert summary["inputs"]["repositories"] == str(repository_csv_path)
     assert summary["scope"]["input_repositories"] == 2
     markdown_summary = (tmp_path / "evaluation" / "evaluation_summary.md").read_text(encoding="utf-8")
-    assert "| Input repositories | 2 |" in markdown_summary
+    scope = {row["Item"]: row["Count"] for row in _markdown_table(markdown_summary, "Scope")}
+    assert scope["Input repositories"] == "2"
 
 
 def test_evaluation_summary_includes_repository_scope(tmp_path: Path) -> None:
@@ -248,12 +249,36 @@ def test_evaluation_writes_summary_metrics(tmp_path: Path) -> None:
         "strict_accuracy": 0.5,
     }
     markdown_summary = (output_dir / "evaluation_summary.md").read_text(encoding="utf-8")
-    assert "Metrics cover only the manually reviewed checklist subset." in markdown_summary
-    assert "| Human-labeled repositories | 1 |" in markdown_summary
-    assert "| Human-pass repositories | 1 |" in markdown_summary
-    assert "| LLM-pass repositories | 1 |" in markdown_summary
-    assert "## Confusion matrix" in markdown_summary
-    assert "Review, model_error, and missing predictions count as incorrect." in markdown_summary
+    introduction = markdown_summary.partition("## Scope")[0]
+    assert any(line.startswith("> ") and "manually reviewed" in line for line in introduction.splitlines())
+
+    scope = {row["Item"]: row["Count"] for row in _markdown_table(markdown_summary, "Scope")}
+    assert scope["Human-labeled repositories"] == "1"
+    assert scope["Human-pass repositories"] == "1"
+    assert scope["LLM-pass repositories"] == "1"
+
+    matrix = {row["Human \\ LLM"]: row for row in _markdown_table(markdown_summary, "Confusion matrix")}
+    assert matrix["pass"] == {
+        "Human \\ LLM": "pass",
+        "pass": "1",
+        "not_found": "1",
+        "review": "0",
+        "model_error": "0",
+        "missing": "0",
+    }
+    assert matrix["not_found"] == {
+        "Human \\ LLM": "not_found",
+        "pass": "1",
+        "not_found": "1",
+        "review": "0",
+        "model_error": "0",
+        "missing": "0",
+    }
+
+    metrics = {row["Metric"]: row["Value"] for row in _markdown_table(markdown_summary, "Metrics")}
+    assert metrics["Resolved accuracy"] == "0.5000"
+    assert metrics["Strict accuracy"] == "0.5000"
+    assert metrics["Resolution rate"] == "1.0000"
 
 
 def test_evaluation_writes_repository_breakdown(tmp_path: Path) -> None:
@@ -373,3 +398,17 @@ def _write_csv(path: Path, rows: tuple[dict[str, str], ...]) -> None:
         writer = csv.DictWriter(output_file, fieldnames=tuple(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _markdown_table(markdown: str, heading: str) -> list[dict[str, str]]:
+    _prefix, separator, remainder = markdown.partition(f"## {heading}\n")
+    if not separator:
+        raise AssertionError(f"Missing Markdown section: {heading}")
+    section = remainder.partition("\n## ")[0]
+    lines = [line for line in section.splitlines() if line.startswith("|")]
+    headers = _markdown_cells(lines[0])
+    return [dict(zip(headers, _markdown_cells(line), strict=True)) for line in lines[2:]]
+
+
+def _markdown_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]

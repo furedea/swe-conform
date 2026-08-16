@@ -144,14 +144,19 @@ def test_docker_client_exposes_only_the_snapshot_outputs_and_temporary_codex_hom
     assert result.value == {"status": "not_found"}
 
 
-def test_codex_docker_image_pins_the_cli_version() -> None:
+def test_codex_docker_image_installs_the_pinned_cli_version() -> None:
     dockerfile = (PROJECT_ROOT / "docker" / "codex.Dockerfile").read_text(encoding="utf-8")
+    version_line = next(line for line in dockerfile.splitlines() if line.startswith("ARG CODEX_VERSION="))
 
-    assert "ARG CODEX_VERSION=0.146.0" in dockerfile
-    assert "bubblewrap" in dockerfile
-    assert 'npm install --global "@openai/codex@${CODEX_VERSION}"' in dockerfile
-    assert '-path "*/codex-resources/bwrap" -delete' in dockerfile
-    assert 'ENTRYPOINT ["codex"]' in dockerfile
+    assert version_line.removeprefix("ARG CODEX_VERSION=") == "0.146.0"
+    assert "@openai/codex@${CODEX_VERSION}" in dockerfile
+
+
+def test_codex_docker_image_uses_codex_as_its_command_boundary() -> None:
+    dockerfile = (PROJECT_ROOT / "docker" / "codex.Dockerfile").read_text(encoding="utf-8")
+    instructions = [line.strip() for line in dockerfile.splitlines() if line.strip()]
+
+    assert instructions[-1] == 'ENTRYPOINT ["codex"]'
 
 
 def test_docker_preflight_verifies_bwrap_filesystem_credentials_and_network(

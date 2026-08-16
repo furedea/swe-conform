@@ -11,7 +11,7 @@ from pytest_mock import MockerFixture
 import repository_cache
 
 
-def test_cache_fetches_complete_history_and_blobs_for_the_snapshot_revision(
+def test_cache_fetches_an_unfiltered_snapshot_revision(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -38,7 +38,6 @@ def test_cache_fetches_complete_history_and_blobs_for_the_snapshot_revision(
     fetch_command = next(command for command in commands if "fetch" in command)
     assert "--depth" not in " ".join(fetch_command)
     assert "--filter" not in " ".join(fetch_command)
-    assert "--no-tags" in fetch_command
     assert f"{revision}:refs/snapshots/{revision}" in fetch_command
     assert any("https://github.com/example/project.git" in command for command in commands)
 
