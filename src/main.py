@@ -19,6 +19,8 @@ import github_repository
 import guideline_classifier
 import guideline_collection
 import guideline_collection_reports
+import guideline_finalization
+import guideline_review
 import markdown_audit
 import markdown_batch
 import markdown_cache_classification
@@ -64,8 +66,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         _preflight(arguments)
     elif arguments.command == "filter":
         _filter(arguments)
-    elif arguments.command == "sample-repositories":
-        _sample_repositories(arguments)
+    elif arguments.command in {
+        "sample-repositories",
+        "apply-guideline-checklist",
+        "finalize-guideline-collection",
+    }:
+        _run_dataset_command(arguments)
     elif arguments.command == "collect-guideline-repositories":
         _collect_guideline_repositories(arguments)
     elif arguments.command == "audit-markdown":
@@ -78,6 +84,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         _classify_markdown(arguments)
     else:
         parser.print_help()
+
+
+def _run_dataset_command(arguments: argparse.Namespace) -> None:
+    if arguments.command == "sample-repositories":
+        _sample_repositories(arguments)
+    elif arguments.command == "apply-guideline-checklist":
+        _apply_guideline_checklist(arguments)
+    else:
+        _finalize_guideline_collection(arguments)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -139,7 +154,7 @@ def _parser() -> argparse.ArgumentParser:
     sample_parser.add_argument("--sample-seed", type=int, default=_DEFAULT_REPOSITORY_SAMPLE_SEED)
     sample_parser.add_argument("--exclude-csv", type=Path, action="append")
 
-    _add_guideline_collection_arguments(subparsers)
+    _add_guideline_workflow_arguments(subparsers)
 
     audit_parser = subparsers.add_parser(
         "audit-markdown",
@@ -155,6 +170,38 @@ def _parser() -> argparse.ArgumentParser:
     _add_batch_markdown_arguments(subparsers)
     _add_classify_markdown_arguments(subparsers)
     return parser
+
+
+def _add_guideline_workflow_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    _add_guideline_review_arguments(subparsers)
+    _add_guideline_finalization_arguments(subparsers)
+    _add_guideline_collection_arguments(subparsers)
+
+
+def _add_guideline_review_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    parser = subparsers.add_parser(
+        "apply-guideline-checklist",
+        help="Validate completed human decisions and materialize accepted guideline files",
+    )
+    parser.add_argument("--checklist-csv", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+
+
+def _add_guideline_finalization_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    parser = subparsers.add_parser(
+        "finalize-guideline-collection",
+        help="Validate and materialize one final guideline collection bundle",
+    )
+    parser.add_argument("--collection-dir", type=Path, required=True)
+    parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
+    parser.add_argument("--human-checklist", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
 
 
 def _add_guideline_collection_arguments(
@@ -175,6 +222,11 @@ def _add_guideline_collection_arguments(
         "--human-checklist",
         type=Path,
         help="Resume after manual review and replace repositories whose positive files were all rejected",
+    )
+    parser.add_argument(
+        "--review-output-checklist",
+        type=Path,
+        help="Write the next manual-review round without changing the completed input checklist",
     )
     parser.add_argument("--exclude-repository", action="append", default=[])
     parser.add_argument("--target-total-repositories", type=_positive_integer, default=120)
@@ -595,6 +647,43 @@ def _sample_repositories(arguments: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
 
+def _apply_guideline_checklist(arguments: argparse.Namespace) -> None:
+    report = guideline_review.apply_guideline_checklist(
+        checklist_path=arguments.checklist_csv,
+        output_dir=arguments.output_dir,
+    )
+    payload = {
+        "accepted_files": report.accepted_files,
+        "accepted_repositories": report.accepted_repositories,
+        "duplicate_files": report.duplicate_files,
+        "input_files": report.input_files,
+        "not_found_files": report.not_found_files,
+        "output_dir": str(report.output_dir),
+        "rejected_repositories": report.rejected_repositories,
+        "reviewed_repositories": report.reviewed_repositories,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _finalize_guideline_collection(arguments: argparse.Namespace) -> None:
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=arguments.collection_dir,
+        baseline_checklist_paths=tuple(arguments.baseline_checklist),
+        human_checklist_path=arguments.human_checklist,
+        output_dir=arguments.output_dir,
+    )
+    payload = {
+        "baseline_guideline_files": report.baseline_guideline_files,
+        "baseline_repositories": report.baseline_repositories,
+        "guideline_files": report.guideline_files,
+        "new_guideline_files": report.new_guideline_files,
+        "new_repositories": report.new_repositories,
+        "output_dir": str(report.output_dir),
+        "repositories": report.repositories,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
 def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     _validate_collection_repository_source(arguments)
     candidates = repository.load_repository_candidates(
@@ -733,6 +822,8 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             repository_client=repository_client,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
+            review_checklist_path=arguments.human_checklist,
+            review_output_checklist_path=arguments.review_output_checklist,
             max_screened_repositories=arguments.max_screened_repositories,
             screening_limit_reached=report.screening_limit_reached if report is not None else False,
             source_metrics=github_source.report_metrics if github_source is not None else None,
