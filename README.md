@@ -212,6 +212,16 @@ language wave would exceed the limit. If a language target is not reached,
 increase the limit and reuse the same output directory to continue from the
 existing checkpoints.
 
+When a changed collection schema requires a fresh output directory, pass the
+completed checklist with `--human-checklist` and its source collection with
+`--prior-collection-dir`. The command verifies the prior inputs,
+classification contract, complete fixed schedule manifest, repositories, and
+revisions before reusing terminal outcomes. Prior positives must all have a
+completed human review. Prior `not_found` and `no_candidates` outcomes are not
+classified again, while prior unresolved outcomes are processed in the new
+run. Carried outcomes do not consume the new output's
+`--max-screened-repositories` budget.
+
 The output keeps both sampling and classification units explicit:
 
 - `sampling_manifest.csv`: the complete fixed repository draw schedule

@@ -38,6 +38,11 @@ class _CacheCollectionScenario:
     schedule: MagicMock
     validate_schedule: MagicMock
     write_schedule: MagicMock
+    prior_collection: main.guideline_collection.PriorCollection
+    load_prior_collection: MagicMock
+    validate_prior_compatibility: MagicMock
+    validate_prior_screenings: MagicMock
+    validate_prior_manifest: MagicMock
     store_factory: MagicMock
     store: MagicMock
     validate_review: MagicMock
@@ -569,6 +574,28 @@ def test_collect_guideline_repositories_accepts_a_separate_next_round_checklist(
     )
 
 
+def test_collect_guideline_repositories_accepts_a_prior_collection() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection-balanced",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
+            "--prior-collection-dir",
+            "experiments/collection",
+        ],
+    )
+
+    assert arguments.prior_collection_dir == Path("experiments/collection")
+
+
 def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     capsys: pytest.CaptureFixture[str],
     mocker: MockerFixture,
@@ -593,6 +620,8 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             str(tmp_path / "checklist_done.csv"),
             "--review-output-checklist",
             str(tmp_path / "checklist_round_2.csv"),
+            "--prior-collection-dir",
+            str(tmp_path / "prior-collection"),
         ],
     )
     baseline_candidate = mocker.Mock(
@@ -691,6 +720,31 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
         autospec=True,
     )
     write_schedule = mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
+    prior_collection = main.guideline_collection.PriorCollection(
+        tmp_path / "prior-collection",
+        {},
+        (
+            main.guideline_collection.RepositoryScreening(scheduled, status="pass"),
+            main.guideline_collection.RepositoryScreening(ineligible_scheduled, status="pass"),
+        ),
+    )
+    load_prior_collection = mocker.patch(
+        "main.guideline_collection.load_prior_collection",
+        autospec=True,
+        return_value=prior_collection,
+    )
+    validate_prior_compatibility = mocker.patch(
+        "main.guideline_collection.validate_prior_collection_compatibility",
+        autospec=True,
+    )
+    validate_prior_screenings = mocker.patch(
+        "main.guideline_collection.validate_prior_screenings",
+        autospec=True,
+    )
+    validate_prior_manifest = mocker.patch(
+        "main.guideline_collection.validate_prior_schedule_manifest",
+        autospec=True,
+    )
     store_factory = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True)
     store = store_factory.return_value
     validate_review = mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)
@@ -711,6 +765,7 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             processed_repositories=1,
             target_reached=False,
             human_target_reached=False,
+            carried_screened_repositories=1,
             target_repositories_by_language=dict.fromkeys(baseline_counts, 30),
             baseline_repositories_by_language=baseline_counts,
             confirmed_new_repositories_by_language=dict.fromkeys(baseline_counts, 0),
@@ -742,6 +797,11 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             schedule=schedule,
             validate_schedule=validate_schedule,
             write_schedule=write_schedule,
+            prior_collection=prior_collection,
+            load_prior_collection=load_prior_collection,
+            validate_prior_compatibility=validate_prior_compatibility,
+            validate_prior_screenings=validate_prior_screenings,
+            validate_prior_manifest=validate_prior_manifest,
             store_factory=store_factory,
             store=store,
             validate_review=validate_review,
@@ -765,10 +825,35 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
         "new/ineligible",
     ]
     scenario.path_fingerprints.assert_any_call((scenario.tmp_path / "license_allowlist.csv",))
+    scenario.path_fingerprints.assert_any_call(
+        (
+            scenario.tmp_path / "prior-collection" / "collection_configuration.json",
+            scenario.tmp_path / "prior-collection" / "repository_attempts.jsonl",
+            scenario.tmp_path / "prior-collection" / "sampling_manifest.csv",
+        ),
+    )
     assert configuration["target_repositories_by_language"] == dict.fromkeys(scenario.baseline_counts, 30)
     assert configuration["baseline_repositories_by_language"] == scenario.baseline_counts
     eligible_manual_review = main.guideline_collection.ManualReviewState({"new/project"}, set())
-    scenario.validate_review.assert_called_once_with(eligible_manual_review, store=scenario.store)
+    eligible_prior_screenings = (scenario.prior_collection.screenings[0],)
+    scenario.load_prior_collection.assert_called_once_with(scenario.tmp_path / "prior-collection")
+    scenario.validate_prior_compatibility.assert_called_once_with(
+        scenario.prior_collection,
+        current_configuration=configuration,
+    )
+    scenario.validate_prior_screenings.assert_called_once_with(
+        scenario.prior_collection.screenings,
+        schedule=(scenario.scheduled, scenario.ineligible_scheduled, scenario.later_scheduled),
+    )
+    scenario.validate_prior_manifest.assert_called_once_with(
+        scenario.tmp_path / "prior-collection" / "sampling_manifest.csv",
+        schedule=(scenario.scheduled, scenario.ineligible_scheduled, scenario.later_scheduled),
+    )
+    scenario.validate_review.assert_called_once_with(
+        eligible_manual_review,
+        store=scenario.store,
+        prior_screenings=eligible_prior_screenings,
+    )
     scenario.load_allowlist.assert_called_once_with(scenario.tmp_path / "license_allowlist.csv")
     scenario.count_baseline.assert_called_once_with(
         {"baseline/project"},
@@ -790,8 +875,11 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
     )
     assert scenario.collect.call_args.args[0] == (scenario.scheduled, scenario.later_scheduled)
     assert scenario.collect.call_args.kwargs["confirmed_repositories"] == {"new/project"}
+    assert scenario.collect.call_args.kwargs["prior_screenings"] == eligible_prior_screenings
     assert scenario.collect.call_args.kwargs["baseline_repository_counts"] == scenario.baseline_counts
     assert scenario.write_reports.call_args.kwargs["baseline_repository_counts"] == scenario.baseline_counts
+    assert scenario.write_reports.call_args.kwargs["schedule"] == (scenario.scheduled, scenario.later_scheduled)
+    assert scenario.write_reports.call_args.kwargs["prior_screenings"] == eligible_prior_screenings
     assert scenario.write_reports.call_args.kwargs["license_ineligible_reviewed_repositories"] == 2
     assert scenario.write_reports.call_args.kwargs["review_checklist_path"] == scenario.tmp_path / "checklist_done.csv"
     assert (
@@ -800,6 +888,7 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
     )
     scenario.client.close.assert_called_once_with()
     assert scenario.output["license_ineligible_reviewed_repositories"] == 2
+    assert scenario.output["carried_screened_repositories"] == 1
     assert scenario.output["target_repositories_by_language"] == dict.fromkeys(scenario.baseline_counts, 30)
     assert scenario.output["selected_repositories_by_language"] == scenario.baseline_counts
     assert scenario.output["remaining_repositories_by_language"] == {

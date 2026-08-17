@@ -77,6 +77,7 @@ _COLLECTION_CONFIGURATION_FIELDS = (
     "license_allowlist",
     "license_allowlist_fingerprints",
     "license_ineligible_reviewed_repositories",
+    "prior_collection_fingerprints",
     "sample_seed",
     "sampling_method",
     "target_total_repositories",
@@ -116,6 +117,7 @@ def finalize_guideline_collection(
     license_allowlist = _validated_license_allowlist(configuration, path=license_allowlist_path)
     _validate_selected_licenses(license_allowlist, selected=selected)
     _validate_baseline_fingerprints(configuration, baseline_checklist_paths)
+    prior_collection_paths = _validated_prior_collection_paths(configuration)
     sources = [
         *(
             _review_source(path, origin="baseline", require_duplicate_column=False)
@@ -152,6 +154,7 @@ def finalize_guideline_collection(
         baseline_checklist_paths=baseline_checklist_paths,
         human_checklist_path=human_checklist_path,
         license_allowlist_path=license_allowlist_path,
+        prior_collection_paths=prior_collection_paths,
         artifacts={
             _REPOSITORIES_FILENAME: _sha256_text(repository_text),
             _GUIDELINE_FILES_FILENAME: _sha256_text(guideline_text),
@@ -248,6 +251,34 @@ def _validate_baseline_fingerprints(
     actual = sorted(_sha256_file(path) for path in baseline_checklist_paths)
     if actual != expected:
         raise ValueError("baseline checklist fingerprints do not match collection configuration")
+
+
+def _validated_prior_collection_paths(configuration: Mapping[str, object]) -> tuple[Path, ...]:
+    raw_fingerprints = configuration.get("prior_collection_fingerprints")
+    if not isinstance(raw_fingerprints, dict) or any(
+        not isinstance(path, str) or not isinstance(fingerprint, str) for path, fingerprint in raw_fingerprints.items()
+    ):
+        raise ValueError("collection configuration has invalid prior collection fingerprints")
+    expected_names = {
+        "collection_configuration.json",
+        "repository_attempts.jsonl",
+        "sampling_manifest.csv",
+    }
+    if raw_fingerprints and (
+        len(raw_fingerprints) != len(expected_names)
+        or {Path(path).name for path in raw_fingerprints if isinstance(path, str)} != expected_names
+    ):
+        raise ValueError("collection configuration has invalid prior collection fingerprints")
+    fingerprints = {
+        path: fingerprint
+        for path, fingerprint in raw_fingerprints.items()
+        if isinstance(path, str) and isinstance(fingerprint, str)
+    }
+    paths = tuple(Path(path) for path in fingerprints)
+    for path in paths:
+        if _sha256_file(path) != fingerprints[str(path)]:
+            raise ValueError(f"prior collection fingerprint does not match: {path}")
+    return paths
 
 
 def _validate_repository_sets(
@@ -493,6 +524,7 @@ def _provenance(
     baseline_checklist_paths: Sequence[Path],
     human_checklist_path: Path,
     license_allowlist_path: Path,
+    prior_collection_paths: Sequence[Path],
     artifacts: Mapping[str, str],
 ) -> dict[str, object]:
     sources = [
@@ -501,6 +533,7 @@ def _provenance(
         *(_source_record(path, role="baseline_checklist") for path in baseline_checklist_paths),
         _source_record(human_checklist_path, role="human_checklist"),
         _source_record(license_allowlist_path, role="license_allowlist"),
+        *(_source_record(path, role="prior_collection") for path in prior_collection_paths),
     ]
     return {
         "schema_version": 1,

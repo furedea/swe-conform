@@ -8,6 +8,7 @@ import os
 import subprocess
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import batch_runner
@@ -53,6 +54,13 @@ _DEFAULT_BATCH_SAMPLE_SIZE = 20
 _DEFAULT_BATCH_SAMPLE_SEED = 20260806
 _DEFAULT_REPOSITORY_SAMPLE_SEED = 20260807
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PriorCollectionInputs:
+    collection: guideline_collection.PriorCollection | None
+    eligible_screenings: tuple[guideline_collection.RepositoryScreening, ...]
+    fingerprints: Mapping[str, str]
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -248,6 +256,11 @@ def _add_guideline_collection_arguments(
     parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
     parser.add_argument("--exclude-csv", type=Path, action="append", required=True)
     parser.add_argument("--license-allowlist-csv", type=Path, required=True)
+    parser.add_argument(
+        "--prior-collection-dir",
+        type=Path,
+        help="Reuse terminal screening outcomes from an earlier compatible collection",
+    )
     parser.add_argument(
         "--human-checklist",
         type=Path,
@@ -791,6 +804,11 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         baseline_repository_counts=baseline_repository_counts,
         target_total_repositories=arguments.target_total_repositories,
     )
+    prior = _load_prior_collection_inputs(
+        arguments.prior_collection_dir,
+        eligible_repositories=license_eligible_repositories,
+        complete_schedule=complete_schedule,
+    )
     configuration = {
         "schema_version": 4,
         "repository_source": arguments.repository_source,
@@ -807,6 +825,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "baseline_checklist_fingerprints": _path_fingerprints(baseline_checklists),
         "exclude_csv_fingerprints": _path_fingerprints(exclude_csvs),
         "license_allowlist_fingerprints": _path_fingerprints((arguments.license_allowlist_csv,)),
+        "prior_collection_fingerprints": dict(prior.fingerprints),
         "license_allowlist": sorted(license_allowlist.license_names, key=str.casefold),
         "license_ineligible_reviewed_repositories": sorted(
             review_state.ineligible_accepted_repositories,
@@ -834,9 +853,13 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "git_command": arguments.git_command,
         "enforce_snapshot_window": arguments.enforce_snapshot_window,
     }
-    store = guideline_collection.RepositoryCollectionStore(arguments.output_dir, configuration=configuration)
-    store.initialize()
-    guideline_collection.validate_manual_review_state(manual_review, store=store)
+    _validate_prior_collection_compatibility(prior.collection, configuration=configuration)
+    store = _initialized_collection_store(arguments.output_dir, configuration=configuration)
+    guideline_collection.validate_manual_review_state(
+        manual_review,
+        store=store,
+        prior_screenings=prior.eligible_screenings,
+    )
     repository_sampling.write_stratified_schedule(
         arguments.output_dir / "sampling_manifest.csv",
         complete_schedule,
@@ -903,6 +926,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             target_total_repositories=arguments.target_total_repositories,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
+            prior_screenings=prior.eligible_screenings,
             store=store,
             processor=processor,
             workers=arguments.repository_workers,
@@ -913,6 +937,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         guideline_collection_reports.write_collection_reports(
             output_dir=arguments.output_dir,
             population=candidates,
+            schedule=schedule,
             store=store,
             baseline_repositories=baseline_repositories,
             baseline_repository_counts=baseline_repository_counts,
@@ -920,6 +945,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             repository_client=repository_client,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
+            prior_screenings=prior.eligible_screenings,
             review_checklist_path=arguments.human_checklist,
             review_output_checklist_path=arguments.review_output_checklist,
             max_screened_repositories=arguments.max_screened_repositories,
@@ -949,6 +975,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "pending_new_repositories_by_language": report.pending_new_repositories_by_language,
         "selected_repositories_by_language": report.selected_repositories_by_language,
         "remaining_repositories_by_language": report.remaining_repositories_by_language,
+        "carried_screened_repositories": report.carried_screened_repositories,
         "processed_repositories": report.processed_repositories,
         "max_screened_repositories": arguments.max_screened_repositories,
         "screening_limit_reached": report.screening_limit_reached,
@@ -1016,6 +1043,51 @@ def _license_filtered_collection_schedules(
         target_total_repositories=target_total_repositories,
     )
     return complete, eligible
+
+
+def _load_prior_collection_inputs(
+    collection_dir: Path | None,
+    *,
+    eligible_repositories: set[str],
+    complete_schedule: Sequence[repository_sampling.ScheduledRepository],
+) -> _PriorCollectionInputs:
+    if collection_dir is None:
+        return _PriorCollectionInputs(None, (), {})
+    collection = guideline_collection.load_prior_collection(collection_dir)
+    guideline_collection.validate_prior_screenings(collection.screenings, schedule=complete_schedule)
+    guideline_collection.validate_prior_schedule_manifest(
+        collection_dir / "sampling_manifest.csv",
+        schedule=complete_schedule,
+    )
+    eligible_screenings = tuple(
+        result
+        for result in collection.screenings
+        if result.scheduled.candidate.repository.casefold() in eligible_repositories
+    )
+    fingerprints = _path_fingerprints(_prior_collection_paths(collection_dir))
+    return _PriorCollectionInputs(collection, eligible_screenings, fingerprints)
+
+
+def _validate_prior_collection_compatibility(
+    prior: guideline_collection.PriorCollection | None,
+    *,
+    configuration: Mapping[str, object],
+) -> None:
+    if prior is not None:
+        guideline_collection.validate_prior_collection_compatibility(
+            prior,
+            current_configuration=configuration,
+        )
+
+
+def _initialized_collection_store(
+    output_dir: Path,
+    *,
+    configuration: dict[str, object],
+) -> guideline_collection.RepositoryCollectionStore:
+    store = guideline_collection.RepositoryCollectionStore(output_dir, configuration=configuration)
+    store.initialize()
+    return store
 
 
 def _audit_markdown(arguments: argparse.Namespace) -> None:
@@ -1604,6 +1676,14 @@ def _input_fingerprints(input_dir: Path) -> dict[str, str]:
         with input_path.open("rb") as input_file:
             fingerprints[input_path.name] = hashlib.file_digest(input_file, "sha256").hexdigest()
     return fingerprints
+
+
+def _prior_collection_paths(collection_dir: Path) -> tuple[Path, Path, Path]:
+    return (
+        collection_dir / "collection_configuration.json",
+        collection_dir / "repository_attempts.jsonl",
+        collection_dir / "sampling_manifest.csv",
+    )
 
 
 def _path_fingerprints(paths: Sequence[Path]) -> dict[str, str]:

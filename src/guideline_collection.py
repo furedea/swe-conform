@@ -21,6 +21,33 @@ import repository_sampling
 
 _ATTEMPTS_FILENAME = "repository_attempts.jsonl"
 _CONFIGURATION_FILENAME = "collection_configuration.json"
+_SAMPLING_MANIFEST_FIELDS = (
+    "sample_order",
+    "round_number",
+    "sampling_language",
+    "language_population",
+    "name",
+    "lastCommitSHA",
+    "source_file",
+    "source_input_index",
+)
+_PRIOR_COMPATIBILITY_FIELDS = (
+    "repository_source",
+    "sample_seed",
+    "languages",
+    "excluded_repositories",
+    "input_fingerprints",
+    "exclude_csv_fingerprints",
+    "classification_contract_sha256",
+    "filter",
+    "provider",
+    "region",
+    "model",
+    "reasoning_effort",
+    "max_output_tokens",
+    "max_input_bytes",
+    "enforce_snapshot_window",
+)
 SCREENING_FIELDS = (
     "sample_order",
     "round_number",
@@ -84,6 +111,7 @@ class RepositoryCollectionReport:
     processed_repositories: int
     target_reached: bool
     human_target_reached: bool
+    carried_screened_repositories: int = 0
     screening_limit_reached: bool = False
     target_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
     baseline_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
@@ -105,6 +133,15 @@ class EligibilityFilteredReviewState:
     manual_review: ManualReviewState
     eligible_repositories: frozenset[str]
     ineligible_accepted_repositories: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class PriorCollection:
+    """Read-only screening evidence carried from an earlier collection."""
+
+    output_dir: Path
+    configuration: Mapping[str, object]
+    screenings: tuple[RepositoryScreening, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +359,129 @@ class RepositoryCollectionStore:
         return results
 
 
+def load_prior_collection(output_dir: Path) -> PriorCollection:
+    """Load an existing collection as read-only continuation evidence."""
+    configuration_path = output_dir / _CONFIGURATION_FILENAME
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    if not isinstance(configuration, dict):
+        raise ValueError(f"collection configuration must be a JSON object: {configuration_path}")
+    attempts_path = output_dir / _ATTEMPTS_FILENAME
+    if not attempts_path.is_file():
+        raise FileNotFoundError(f"prior collection attempts do not exist: {attempts_path}")
+    store = RepositoryCollectionStore(output_dir, configuration=configuration)
+    store.initialize()
+    screenings = store.results()
+    if not screenings:
+        raise ValueError(f"prior collection has no screening outcomes: {output_dir}")
+    return PriorCollection(output_dir, configuration, screenings)
+
+
+def validate_prior_screenings(
+    screenings: Sequence[RepositoryScreening],
+    *,
+    schedule: Sequence[repository_sampling.ScheduledRepository],
+) -> None:
+    """Require prior outcomes to identify the same seeded schedule positions."""
+    current_by_order = {item.sample_order: item for item in schedule}
+    for screening in screenings:
+        prior = screening.scheduled
+        current = current_by_order.get(prior.sample_order)
+        if current is None or _schedule_identity(current) != _schedule_identity(prior):
+            raise ValueError(
+                f"prior screening does not match the current schedule: {prior.candidate.repository}",
+            )
+
+
+def validate_prior_schedule_manifest(
+    path: Path,
+    *,
+    schedule: Sequence[repository_sampling.ScheduledRepository],
+) -> None:
+    """Require the complete prior manifest to match the current seeded schedule."""
+    with path.open(encoding="utf-8", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        if tuple(reader.fieldnames or ()) != _SAMPLING_MANIFEST_FIELDS:
+            raise ValueError(f"prior sampling manifest has invalid columns: {path}")
+        manifest_identities = tuple(_manifest_schedule_identity(row, path=path) for row in reader)
+    current_identities = tuple(_schedule_manifest_identity(item) for item in schedule)
+    if manifest_identities != current_identities:
+        raise ValueError(f"prior sampling manifest does not match the current schedule: {path}")
+
+
+def validate_prior_collection_compatibility(
+    prior: PriorCollection,
+    *,
+    current_configuration: Mapping[str, object],
+) -> None:
+    """Require carried outcomes to use the current sampling and classification inputs."""
+    for configuration_field in _PRIOR_COMPATIBILITY_FIELDS:
+        prior_value = _portable_configuration_value(
+            configuration_field,
+            prior.configuration.get(configuration_field),
+        )
+        current_value = _portable_configuration_value(
+            configuration_field,
+            current_configuration.get(configuration_field),
+        )
+        if prior_value != current_value:
+            raise ValueError(
+                f"prior collection {configuration_field} does not match the current collection",
+            )
+
+
+def _portable_configuration_value(field: str, value: object) -> object:
+    if field not in {"input_fingerprints", "exclude_csv_fingerprints"}:
+        return value
+    if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
+        raise ValueError(f"collection {field} must map paths to SHA-256 values")
+    return tuple(sorted(value.values()))
+
+
+def _schedule_identity(item: repository_sampling.ScheduledRepository) -> tuple[object, ...]:
+    candidate = item.candidate
+    return (
+        item.sample_order,
+        item.round_number,
+        item.language,
+        item.language_population,
+        candidate.repository.casefold(),
+        candidate.revision.casefold(),
+        candidate.license_name,
+        candidate.source_file,
+        candidate.input_index,
+    )
+
+
+def _schedule_manifest_identity(item: repository_sampling.ScheduledRepository) -> tuple[object, ...]:
+    candidate = item.candidate
+    return (
+        item.sample_order,
+        item.round_number,
+        item.language,
+        item.language_population,
+        candidate.repository.casefold(),
+        candidate.revision.casefold(),
+        candidate.source_file,
+        candidate.input_index,
+    )
+
+
+def _manifest_schedule_identity(row: Mapping[str, str], *, path: Path) -> tuple[object, ...]:
+    try:
+        return (
+            int(row["sample_order"]),
+            int(row["round_number"]),
+            row["sampling_language"],
+            int(row["language_population"]),
+            row["name"].casefold(),
+            row["lastCommitSHA"].casefold(),
+            row["source_file"],
+            int(row["source_input_index"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"prior sampling manifest has an invalid row: {path}") from error
+
+
 def load_baseline_repositories(paths: Sequence[Path]) -> set[str]:
     """Return repositories with at least one human-confirmed file."""
     repositories: dict[str, str] = {}
@@ -447,15 +607,31 @@ def validate_manual_review_state(
     state: ManualReviewState,
     *,
     store: RepositoryCollectionStore,
+    prior_screenings: Sequence[RepositoryScreening] = (),
 ) -> None:
-    """Require every manually reviewed repository to be a persisted positive."""
-    positive = {
-        result.scheduled.candidate.repository.casefold() for result in store.results() if result.status == "pass"
-    }
+    """Require every human-reviewed repository to have positive screening evidence."""
+    local = {result.scheduled.candidate.repository.casefold(): result.status for result in store.results()}
+    prior = {result.scheduled.candidate.repository.casefold(): result.status for result in prior_screenings}
     reviewed = state.confirmed_repositories | state.rejected_repositories
-    invalid = sorted(name for name in reviewed if name.casefold() not in positive)
-    if invalid:
-        raise ValueError(f"manual review repository has no persisted positive screening: {invalid[0]}")
+    contradictory = sorted(name for name in reviewed if local.get(name.casefold()) not in {None, "pass"})
+    if contradictory:
+        raise ValueError(f"manual review repository contradicts its persisted screening: {contradictory[0]}")
+    missing = sorted(
+        name for name in reviewed if local.get(name.casefold()) != "pass" and prior.get(name.casefold()) != "pass"
+    )
+    if missing:
+        raise ValueError(f"manual review repository has no positive screening evidence: {missing[0]}")
+    reviewed_names = {name.casefold() for name in reviewed}
+    unreviewed_prior_positives = sorted(
+        result.scheduled.candidate.repository
+        for result in prior_screenings
+        if result.status == "pass"
+        if result.scheduled.candidate.repository.casefold() not in reviewed_names
+    )
+    if unreviewed_prior_positives:
+        raise ValueError(
+            f"prior positive screening has no human review: {unreviewed_prior_positives[0]}",
+        )
 
 
 def collect_repositories(
@@ -465,6 +641,7 @@ def collect_repositories(
     target_total_repositories: int,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
+    prior_screenings: Sequence[RepositoryScreening] = (),
     store: RepositoryCollectionStore,
     processor: RepositoryProcessor,
     workers: int,
@@ -489,6 +666,12 @@ def collect_repositories(
     )
     remaining_targets = remaining_repository_targets_by_language(new_targets, confirmed_counts=confirmed_counts)
     reviewed = confirmed | rejected
+    carried_terminal = {
+        result.scheduled.candidate.repository.casefold()
+        for result in prior_screenings
+        if result.status in {"pass", "not_found", "no_candidates"}
+    }
+    already_screened = reviewed | carried_terminal
     rounds: defaultdict[int, list[repository_sampling.ScheduledRepository]] = defaultdict(list)
     for item in schedule:
         rounds[item.round_number].append(item)
@@ -504,7 +687,11 @@ def collect_repositories(
         next_wave = tuple(
             item
             for item in rounds[round_number]
-            if item.language in active_languages and item.sample_order not in store.completed_orders()
+            if (
+                item.language in active_languages
+                and item.sample_order not in store.completed_orders()
+                and item.candidate.repository.casefold() not in already_screened
+            )
         )
         if max_screened_repositories is not None and len(store.results()) + len(next_wave) > max_screened_repositories:
             screening_limit_reached = True
@@ -554,6 +741,7 @@ def collect_repositories(
         processed_repositories=len(store.results()),
         target_reached=target_reached,
         human_target_reached=human_target_reached,
+        carried_screened_repositories=len(carried_terminal),
         screening_limit_reached=screening_limit_reached and not target_reached,
         target_repositories_by_language=target_counts,
         baseline_repositories_by_language=dict(baseline_repository_counts),

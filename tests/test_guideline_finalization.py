@@ -263,6 +263,28 @@ def test_collection_without_the_recorded_license_policy_is_rejected(tmp_path: Pa
     assert not inputs.output_dir.exists()
 
 
+def test_collection_without_a_prior_collection_provenance_field_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration.pop("prior_collection_fingerprints")
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid prior collection fingerprints"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
 def test_previous_collection_configuration_schema_is_rejected(tmp_path: Path) -> None:
     inputs = _valid_inputs(tmp_path)
     configuration_path = inputs.collection_dir / "collection_configuration.json"
@@ -367,6 +389,66 @@ def test_changed_license_allowlist_is_rejected_by_its_recorded_fingerprint(tmp_p
     assert not inputs.output_dir.exists()
 
 
+def test_prior_collection_sources_are_verified_and_recorded_in_provenance(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    prior_configuration, prior_attempts, prior_manifest = _record_prior_collection(inputs, root=tmp_path / "prior")
+
+    guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    provenance = json.loads((inputs.output_dir / "provenance.json").read_text(encoding="utf-8"))
+    prior_sources = [source for source in provenance["sources"] if source["role"] == "prior_collection"]
+    assert {source["path"] for source in prior_sources} == {
+        str(prior_configuration),
+        str(prior_attempts),
+        str(prior_manifest),
+    }
+
+
+def test_changed_prior_collection_source_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    _, prior_attempts, _ = _record_prior_collection(inputs, root=tmp_path / "prior")
+    prior_attempts.write_text('{"status": "pass"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="prior collection fingerprint does not match"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def _record_prior_collection(inputs: FinalizationInputs, *, root: Path) -> tuple[Path, Path, Path]:
+    root.mkdir()
+    prior_configuration = root / "collection_configuration.json"
+    prior_attempts = root / "repository_attempts.jsonl"
+    prior_manifest = root / "sampling_manifest.csv"
+    prior_configuration.write_text('{"schema_version": 2}\n', encoding="utf-8")
+    prior_attempts.write_text('{"status": "not_found"}\n', encoding="utf-8")
+    prior_manifest.write_text("sample_order,name\n1,example/prior\n", encoding="utf-8")
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["prior_collection_fingerprints"] = {
+        str(prior_configuration): _sha256(prior_configuration),
+        str(prior_attempts): _sha256(prior_attempts),
+        str(prior_manifest): _sha256(prior_manifest),
+    }
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    return prior_configuration, prior_attempts, prior_manifest
+
+
 def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
     collection_dir = tmp_path / "collection"
     collection_dir.mkdir()
@@ -443,6 +525,7 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
         "license_ineligible_reviewed_repositories": [],
         "model": "gpt-5.6-luna",
         "provider": "bedrock",
+        "prior_collection_fingerprints": {},
         "reasoning_effort": "max",
         "sample_seed": 20260807,
         "sampling_method": "stratified_random_round_robin_until_target",

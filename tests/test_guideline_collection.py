@@ -254,21 +254,52 @@ def test_manual_review_state_deduplicates_repository_names_case_insensitively(tm
     assert state.rejected_repositories == set()
 
 
-def test_manual_review_repositories_must_have_a_persisted_positive_screening(tmp_path: Path) -> None:
+def test_manual_review_state_accepts_repository_with_a_prior_positive_screening(tmp_path: Path) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    prior = _scheduled_repository("Java", 1)
+    state = guideline_collection.ManualReviewState(
+        confirmed_repositories={prior.candidate.repository},
+        rejected_repositories=set(),
+    )
+
+    guideline_collection.validate_manual_review_state(
+        state,
+        store=store,
+        prior_screenings=(guideline_collection.RepositoryScreening(prior, status="pass"),),
+    )
+
+
+def test_manual_review_repositories_must_not_contradict_persisted_screenings(tmp_path: Path) -> None:
     store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
     store.initialize()
     store.append(guideline_collection.RepositoryScreening(_scheduled_repository("Java", 1), status="pass"))
+    rejected = _scheduled_repository("Python", 2)
+    store.append(guideline_collection.RepositoryScreening(rejected, status="not_found"))
     state = guideline_collection.ManualReviewState(
         confirmed_repositories={"owner-java/project-1"},
-        rejected_repositories={"unknown/project"},
+        rejected_repositories={rejected.candidate.repository},
     )
 
     try:
         guideline_collection.validate_manual_review_state(state, store=store)
     except ValueError as error:
-        assert "unknown/project" in str(error)
+        assert rejected.candidate.repository in str(error)
     else:
-        raise AssertionError("manual review for an unscreened repository was accepted")
+        raise AssertionError("manual review contradicting a persisted screening was accepted")
+
+
+def test_prior_positive_screenings_must_have_a_completed_human_review(tmp_path: Path) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    prior = _scheduled_repository("Java", 1)
+
+    with pytest.raises(ValueError, match="prior positive screening has no human review"):
+        guideline_collection.validate_manual_review_state(
+            guideline_collection.ManualReviewState(set(), set()),
+            store=store,
+            prior_screenings=(guideline_collection.RepositoryScreening(prior, status="pass"),),
+        )
 
 
 def test_collection_store_keeps_attempts_and_selects_each_positive_repository_once(tmp_path: Path) -> None:
@@ -290,6 +321,105 @@ def test_collection_store_keeps_attempts_and_selects_each_positive_repository_on
         "owner-python/project-2",
     ]
     assert len((tmp_path / "repository_attempts.jsonl").read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_prior_collection_loads_each_latest_screening_outcome(tmp_path: Path) -> None:
+    prior_dir = tmp_path / "prior"
+    store = guideline_collection.RepositoryCollectionStore(prior_dir, configuration={"sample_seed": 41})
+    store.initialize()
+    first = _scheduled_repository("Java", 1)
+    second = _scheduled_repository("Python", 2)
+    store.append(guideline_collection.RepositoryScreening(first, status="not_found"))
+    store.append(guideline_collection.RepositoryScreening(first, status="pass"))
+    store.append(guideline_collection.RepositoryScreening(second, status="no_candidates"))
+
+    loaded = guideline_collection.load_prior_collection(prior_dir)
+
+    assert [(result.scheduled.sample_order, result.status, result.attempt_count) for result in loaded.screenings] == [
+        (1, "pass", 2),
+        (2, "no_candidates", 1),
+    ]
+
+
+def test_prior_screening_must_match_the_current_seeded_schedule() -> None:
+    prior = _scheduled_repository("Java", 1)
+    changed_candidate = repository.RepositoryCandidate(
+        repository=prior.candidate.repository,
+        revision="c" * 40,
+        license_name=prior.candidate.license_name,
+        source_file=prior.candidate.source_file,
+        input_index=prior.candidate.input_index,
+        fields=prior.candidate.fields,
+    )
+    current = repository_sampling.ScheduledRepository(
+        candidate=changed_candidate,
+        sample_order=prior.sample_order,
+        round_number=prior.round_number,
+        language=prior.language,
+        language_population=prior.language_population,
+    )
+
+    with pytest.raises(ValueError, match="prior screening does not match the current schedule"):
+        guideline_collection.validate_prior_screenings(
+            (guideline_collection.RepositoryScreening(prior, status="pass"),),
+            schedule=(current,),
+        )
+
+
+def test_prior_schedule_manifest_must_match_the_complete_current_schedule(tmp_path: Path) -> None:
+    first = _scheduled_repository("Java", 1)
+    prior_second = _scheduled_repository("Java", 5)
+    current_second = repository_sampling.ScheduledRepository(
+        candidate=repository.RepositoryCandidate(
+            repository=prior_second.candidate.repository,
+            revision="c" * 40,
+            license_name=prior_second.candidate.license_name,
+            source_file=prior_second.candidate.source_file,
+            input_index=prior_second.candidate.input_index,
+            fields=prior_second.candidate.fields,
+        ),
+        sample_order=prior_second.sample_order,
+        round_number=prior_second.round_number,
+        language=prior_second.language,
+        language_population=prior_second.language_population,
+    )
+    manifest = tmp_path / "sampling_manifest.csv"
+    repository_sampling.write_stratified_schedule(manifest, (first, prior_second))
+
+    with pytest.raises(ValueError, match="prior sampling manifest does not match the current schedule"):
+        guideline_collection.validate_prior_schedule_manifest(
+            manifest,
+            schedule=(first, current_second),
+        )
+
+
+def test_prior_collection_must_use_the_same_classification_contract(tmp_path: Path) -> None:
+    prior = guideline_collection.PriorCollection(
+        tmp_path,
+        {
+            "sample_seed": 41,
+            "input_fingerprints": {"java.csv": "input-hash"},
+            "exclude_csv_fingerprints": {"old/path.csv": "exclude-hash"},
+            "classification_contract_sha256": "prior-contract",
+            "filter": {"filename_terms": []},
+            "provider": "bedrock",
+            "region": "us-east-1",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+            "max_output_tokens": 32_000,
+            "max_input_bytes": 200_000,
+            "enforce_snapshot_window": True,
+        },
+        (),
+    )
+    current = {
+        **prior.configuration,
+        "exclude_csv_fingerprints": {"new/path.csv": "exclude-hash"},
+        "classification_contract_sha256": "current-contract",
+    }
+
+    with pytest.raises(ValueError, match="prior collection classification_contract_sha256 does not match"):
+        guideline_collection.validate_prior_collection_compatibility(prior, current_configuration=current)
 
 
 def test_collection_store_recovers_retryable_file_errors_from_existing_checkpoints(tmp_path: Path) -> None:
@@ -739,6 +869,79 @@ def test_collection_replaces_human_rejected_repositories_from_the_same_schedule(
     assert report.selected_new_repositories == 4
 
 
+def test_collection_does_not_screen_human_reviewed_repositories_without_checkpoints(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    confirmed = _scheduled_repository("Java", 1)
+    rejected = _scheduled_repository("Java", 5)
+    prior_negative = _scheduled_repository("Java", 9)
+    unreviewed = _scheduled_repository("Java", 13)
+    processor = mocker.Mock()
+    processor.process.return_value = guideline_collection.RepositoryScreening(unreviewed, status="pass")
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    report = guideline_collection.collect_repositories(
+        (confirmed, rejected, prior_negative, unreviewed),
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 2,
+            "Python": 2,
+            "TypeScript": 2,
+        },
+        target_total_repositories=8,
+        confirmed_repositories={confirmed.candidate.repository},
+        rejected_repositories={rejected.candidate.repository},
+        prior_screenings=(
+            guideline_collection.RepositoryScreening(confirmed, status="pass"),
+            guideline_collection.RepositoryScreening(rejected, status="pass"),
+            guideline_collection.RepositoryScreening(prior_negative, status="not_found"),
+        ),
+        store=store,
+        processor=processor,
+        workers=1,
+        max_screened_repositories=1,
+    )
+
+    processor.process.assert_called_once_with(unreviewed)
+    assert report.carried_screened_repositories == 3
+    assert report.processed_repositories == 1
+    assert report.target_reached is True
+
+
+def test_collection_processes_a_prior_unresolved_repository_in_the_current_budget(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    unresolved = _scheduled_repository("Java", 1)
+    processor = mocker.Mock()
+    processor.process.return_value = guideline_collection.RepositoryScreening(unresolved, status="pass")
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    report = guideline_collection.collect_repositories(
+        (unresolved,),
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
+        prior_screenings=(guideline_collection.RepositoryScreening(unresolved, status="unresolved"),),
+        store=store,
+        processor=processor,
+        workers=1,
+        max_screened_repositories=1,
+    )
+
+    processor.process.assert_called_once_with(unresolved)
+    assert report.carried_screened_repositories == 0
+    assert report.processed_repositories == 1
+    assert report.target_reached is True
+
+
 def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -785,6 +988,7 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=(scheduled.candidate,),
+        schedule=(scheduled,),
         store=store,
         baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
         baseline_repository_counts={
@@ -855,6 +1059,7 @@ def test_collection_file_reports_follow_sampling_and_candidate_order(
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=(scheduled.candidate,),
+        schedule=(scheduled,),
         store=store,
         baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
         baseline_repository_counts={
@@ -886,6 +1091,7 @@ def test_selected_repository_report_keeps_confirmed_and_pending_rows_in_sampling
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=(first.candidate, second.candidate),
+        schedule=(first, second),
         store=store,
         baseline_repositories={"baseline/javascript", "baseline/typescript"},
         baseline_repository_counts={
@@ -904,6 +1110,47 @@ def test_selected_repository_report_keeps_confirmed_and_pending_rows_in_sampling
     assert repositories == [first.candidate.repository, second.candidate.repository]
 
 
+def test_collection_reports_include_confirmed_repository_without_local_checkpoint(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    confirmed = _scheduled_repository("Java", 1)
+    pending = _scheduled_repository("Python", 2)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(pending, status="pass"))
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(confirmed.candidate, pending.candidate),
+        schedule=(confirmed, pending),
+        store=store,
+        baseline_repositories={"baseline/javascript", "baseline/typescript"},
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 0,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
+        repository_client=mocker.Mock(),
+        confirmed_repositories={confirmed.candidate.repository},
+        prior_screenings=(guideline_collection.RepositoryScreening(confirmed, status="pass"),),
+    )
+
+    with (tmp_path / "selected_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        selected = [row for row in csv.DictReader(input_file) if row["origin"].startswith("new_")]
+    summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
+    assert [row["repository"] for row in selected] == [
+        confirmed.candidate.repository,
+        pending.candidate.repository,
+    ]
+    assert [row["origin"] for row in selected] == ["new_confirmed", "new_pending"]
+    assert summary["confirmed_new_repositories_by_language"]["Java"] == 1
+    assert summary["pending_new_repositories_by_language"]["Python"] == 1
+    assert summary["carried_screened_repositories"] == 1
+
+
 def test_collection_reports_select_the_language_quota_and_report_its_counts(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -920,6 +1167,7 @@ def test_collection_reports_select_the_language_quota_and_report_its_counts(
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=tuple(item.candidate for item in scheduled),
+        schedule=scheduled,
         store=store,
         baseline_repositories=set(),
         baseline_repository_counts=dict.fromkeys(languages, 0),
@@ -950,6 +1198,7 @@ def test_collection_reports_reject_confirmed_repositories_above_a_language_quota
         guideline_collection_reports.write_collection_reports(
             output_dir=tmp_path,
             population=(scheduled.candidate,),
+            schedule=(scheduled,),
             store=store,
             baseline_repositories={"baseline/java"},
             baseline_repository_counts={
@@ -987,6 +1236,7 @@ def test_collection_reports_rebuild_compact_file_views_from_repository_checkpoin
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=(scheduled.candidate,),
+        schedule=(scheduled,),
         store=store,
         baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
         baseline_repository_counts={
@@ -1035,6 +1285,7 @@ def test_collection_reports_reject_candidate_repositories_without_a_checkpoint(
         guideline_collection_reports.write_collection_reports(
             output_dir=tmp_path,
             population=(scheduled.candidate,),
+            schedule=(scheduled,),
             store=store,
             baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
             baseline_repository_counts={
@@ -1065,6 +1316,7 @@ def test_collection_reports_use_the_completed_checklist_as_the_next_round_source
     guideline_collection_reports.write_collection_reports(
         output_dir=tmp_path,
         population=(),
+        schedule=(),
         store=store,
         baseline_repositories={
             "baseline/java",

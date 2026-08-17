@@ -33,6 +33,7 @@ def write_collection_reports(
     *,
     output_dir: Path,
     population: Sequence[repository.RepositoryCandidate],
+    schedule: Sequence[repository_sampling.ScheduledRepository],
     store: guideline_collection.RepositoryCollectionStore,
     baseline_repositories: set[str],
     baseline_repository_counts: Mapping[str, int],
@@ -40,6 +41,7 @@ def write_collection_reports(
     repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
+    prior_screenings: Sequence[guideline_collection.RepositoryScreening] = (),
     review_checklist_path: Path | None = None,
     review_output_checklist_path: Path | None = None,
     max_screened_repositories: int | None = None,
@@ -56,8 +58,12 @@ def write_collection_reports(
     rejected = set(rejected_repositories or ())
     confirmed_names = {name.casefold() for name in confirmed}
     confirmed_results = tuple(
-        result for result in store.results() if result.scheduled.candidate.repository.casefold() in confirmed_names
+        guideline_collection.RepositoryScreening(item, status="pass")
+        for item in schedule
+        if item.candidate.repository.casefold() in confirmed_names
     )
+    if len(confirmed_results) != len(confirmed_names):
+        raise ValueError("confirmed repository is absent from the sampling schedule")
     confirmed_counter = Counter(result.scheduled.language for result in confirmed_results)
     confirmed_counts = {language: confirmed_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
     remaining_targets = guideline_collection.remaining_repository_targets_by_language(
@@ -107,6 +113,13 @@ def write_collection_reports(
         pending_count=len(pending),
         pending_counts=pending_counts,
         rejected_count=len(rejected),
+        carried_screened_count=len(
+            {
+                result.scheduled.candidate.repository.casefold()
+                for result in prior_screenings
+                if result.status in {"pass", "not_found", "no_candidates"}
+            },
+        ),
         processed_count=len(store.results()),
         target_total=target_total_repositories,
         file_rows=file_rows,
@@ -244,6 +257,7 @@ def _write_summary(
     pending_count: int,
     pending_counts: Mapping[str, int],
     rejected_count: int,
+    carried_screened_count: int,
     processed_count: int,
     target_total: int,
     file_rows: Sequence[Mapping[str, object]],
@@ -273,6 +287,7 @@ def _write_summary(
             "confirmed_new_repositories": confirmed_count,
             "pending_new_repositories": pending_count,
             "rejected_new_repositories": rejected_count,
+            "carried_screened_repositories": carried_screened_count,
             "selected_new_repositories": confirmed_count + pending_count,
             "selected_total_repositories": baseline_count + confirmed_count + pending_count,
             "processed_repositories": processed_count,
