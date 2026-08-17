@@ -137,6 +137,74 @@ def test_baseline_repositories_must_be_part_of_the_prior_sample_exclusions() -> 
         raise AssertionError("missing baseline exclusion was accepted")
 
 
+def test_repository_eligibility_filters_reviewed_acceptances_without_hiding_rejections() -> None:
+    eligible_baseline = _scheduled_repository("Java", 1).candidate
+    ineligible_baseline = _scheduled_repository("Python", 2).candidate
+    eligible_confirmed = _scheduled_repository("JavaScript", 3).candidate
+    ineligible_confirmed = _scheduled_repository("TypeScript", 4).candidate
+    ineligible_rejected = _scheduled_repository("Java", 5).candidate
+
+    filtered = guideline_collection.filter_review_state_by_repository_eligibility(
+        baseline_repositories={eligible_baseline.repository, ineligible_baseline.repository},
+        manual_review=guideline_collection.ManualReviewState(
+            {eligible_confirmed.repository, ineligible_confirmed.repository},
+            {ineligible_rejected.repository},
+        ),
+        eligible_repositories={eligible_baseline.repository, eligible_confirmed.repository},
+        population=(
+            eligible_baseline,
+            ineligible_baseline,
+            eligible_confirmed,
+            ineligible_confirmed,
+            ineligible_rejected,
+        ),
+    )
+
+    assert filtered.baseline_repositories == {eligible_baseline.repository}
+    assert filtered.manual_review == guideline_collection.ManualReviewState(
+        {eligible_confirmed.repository},
+        set(),
+    )
+    assert filtered.ineligible_accepted_repositories == {
+        ineligible_baseline.repository,
+        ineligible_confirmed.repository,
+    }
+
+
+def test_repository_eligibility_rejects_reviewed_repository_without_candidate_metadata() -> None:
+    with pytest.raises(ValueError, match="reviewed repository is absent from the candidate population"):
+        guideline_collection.filter_review_state_by_repository_eligibility(
+            baseline_repositories={"example/missing"},
+            manual_review=guideline_collection.ManualReviewState(set(), set()),
+            eligible_repositories=set(),
+            population=(),
+        )
+
+
+def test_eligible_schedule_must_cover_each_language_with_a_remaining_quota() -> None:
+    scheduled = _scheduled_repository("Java", 1)
+
+    with pytest.raises(ValueError, match=r"eligible repository schedule has no candidates.*TypeScript"):
+        guideline_collection.validate_schedule_covers_language_deficits(
+            (scheduled,),
+            baseline_repository_counts={
+                "Java": 1,
+                "JavaScript": 1,
+                "Python": 1,
+                "TypeScript": 0,
+            },
+            target_total_repositories=4,
+        )
+
+
+def test_eligible_schedule_may_omit_a_language_whose_baseline_quota_is_full() -> None:
+    guideline_collection.validate_schedule_covers_language_deficits(
+        (),
+        baseline_repository_counts=dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, 1),
+        target_total_repositories=4,
+    )
+
+
 def test_manual_review_state_confirms_or_rejects_repositories_by_file_decisions(tmp_path: Path) -> None:
     checklist = tmp_path / "checklist.csv"
     with checklist.open("w", encoding="utf-8", newline="") as output_file:
@@ -729,6 +797,7 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
         repository_client=repository_client,
         max_screened_repositories=200,
         screening_limit_reached=True,
+        license_ineligible_reviewed_repositories=2,
         source_metrics=source_metrics,
     )
 
@@ -742,6 +811,7 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
     summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
     assert summary["max_screened_repositories"] == 200
     assert summary["screening_limit_reached"] is True
+    assert summary["license_ineligible_reviewed_repositories"] == 2
     assert summary["github_requests"] == 4
     assert summary["source_content_cache_hits"] == 2
     source_metrics.assert_called_once_with()
@@ -861,6 +931,7 @@ def test_collection_reports_select_the_language_quota_and_report_its_counts(
         selected = list(csv.DictReader(input_file))
     summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
     assert [row["repository"] for row in selected] == [item.candidate.repository for item in scheduled[:4]]
+    assert [row["license_name"] for row in selected] == [item.candidate.license_name for item in scheduled[:4]]
     assert summary["confirmed_new_repositories_by_language"] == dict.fromkeys(languages, 0)
     assert summary["pending_new_repositories_by_language"] == dict.fromkeys(languages, 1)
     assert summary["selected_repositories_by_language"] == dict.fromkeys(languages, 1)

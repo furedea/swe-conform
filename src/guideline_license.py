@@ -40,6 +40,20 @@ class LicenseAllowlistReport:
     output_dir: Path
 
 
+@dataclass(frozen=True, slots=True)
+class LicenseAllowlist:
+    """Human-approved reported license names used across selection stages."""
+
+    license_names: frozenset[str]
+
+    def allows(self, license_name: str) -> bool:
+        """Return whether one reported license name is eligible."""
+        normalized = license_name.strip()
+        return (
+            bool(normalized) and normalized.casefold() != _AMBIGUOUS_LICENSE_NAME and normalized in self.license_names
+        )
+
+
 def prepare_license_review(
     *,
     input_dir: Path,
@@ -97,16 +111,14 @@ def apply_license_allowlist(
 ) -> LicenseAllowlistReport:
     """Partition repositories through a human-authored license-name allowlist."""
     repository_rows = _read_csv(repository_licenses_path, expected_fields=_REPOSITORY_LICENSE_FIELDS)
-    allowlist_rows = _read_csv(allowlist_path, expected_fields=_ALLOWLIST_FIELDS)
-    allowed_names = {row["license_name"].strip() for row in allowlist_rows}
-    accepted = tuple(row for row in repository_rows if _is_allowed(row["license_name"], allowed_names))
-    rejected = tuple(row for row in repository_rows if not _is_allowed(row["license_name"], allowed_names))
-    applicable_names = {name for name in allowed_names if name and name.casefold() != _AMBIGUOUS_LICENSE_NAME}
+    allowlist = load_license_allowlist(allowlist_path)
+    accepted = tuple(row for row in repository_rows if allowlist.allows(row["license_name"]))
+    rejected = tuple(row for row in repository_rows if not allowlist.allows(row["license_name"]))
     report = LicenseAllowlistReport(
         input_repositories=len(repository_rows),
         accepted_repositories=len(accepted),
         rejected_repositories=len(rejected),
-        allowlisted_license_names=len(applicable_names),
+        allowlisted_license_names=len(allowlist.license_names),
         output_dir=output_dir,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -122,6 +134,18 @@ def apply_license_allowlist(
         },
     )
     return report
+
+
+def load_license_allowlist(path: Path) -> LicenseAllowlist:
+    """Load the human-authored license-name policy used by repository selection."""
+    rows = _read_csv(path, expected_fields=_ALLOWLIST_FIELDS)
+    names = frozenset(
+        normalized
+        for row in rows
+        if (normalized := row["license_name"].strip())
+        if normalized.casefold() != _AMBIGUOUS_LICENSE_NAME
+    )
+    return LicenseAllowlist(names)
 
 
 def _accepted_repositories(
@@ -166,11 +190,6 @@ def _accepted_repository_names(rows: Sequence[Mapping[str, str]]) -> set[str]:
         if not row["duplicate_of"].strip()
         if row["repository"].strip()
     }
-
-
-def _is_allowed(license_name: str, allowed_names: set[str]) -> bool:
-    normalized = license_name.strip()
-    return bool(normalized) and normalized.casefold() != _AMBIGUOUS_LICENSE_NAME and normalized in allowed_names
 
 
 def _read_csv(path: Path, *, expected_fields: Sequence[str]) -> tuple[dict[str, str], ...]:

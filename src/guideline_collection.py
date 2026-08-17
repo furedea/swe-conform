@@ -97,6 +97,17 @@ ManualReviewState = guideline_review.GuidelineReviewState
 
 
 @dataclass(frozen=True, slots=True)
+class EligibilityFilteredReviewState:
+    """Reviewed repositories retained by an external eligibility policy."""
+
+    reviewed_baseline_repositories: frozenset[str]
+    baseline_repositories: frozenset[str]
+    manual_review: ManualReviewState
+    eligible_repositories: frozenset[str]
+    ineligible_accepted_repositories: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryFileProcessor:
     """Extract and classify one scheduled repository through a blob client."""
 
@@ -371,12 +382,64 @@ def validate_baseline_exclusions(
         raise ValueError(f"baseline repository is absent from prior-sample exclusions: {missing[0]}")
 
 
+def validate_schedule_covers_language_deficits(
+    schedule: Sequence[repository_sampling.ScheduledRepository],
+    *,
+    baseline_repository_counts: Mapping[str, int],
+    target_total_repositories: int,
+) -> None:
+    """Require an eligible candidate for every language whose quota is not full."""
+    targets = target_repository_counts_by_language(target_total_repositories)
+    scheduled_languages = {item.language for item in schedule}
+    missing = [
+        language
+        for language in repository_sampling.DEFAULT_LANGUAGES
+        if baseline_repository_counts[language] < targets[language] and language not in scheduled_languages
+    ]
+    if missing:
+        raise ValueError(
+            f"eligible repository schedule has no candidates for required language: {missing[0]}",
+        )
+
+
 def load_manual_review_state(path: Path | None) -> ManualReviewState:
     """Aggregate completed file-level human decisions."""
     state = guideline_review.load_completed_review_state(path)
     return ManualReviewState(
         confirmed_repositories=_normalized_repository_names(state.confirmed_repositories),
         rejected_repositories=_normalized_repository_names(state.rejected_repositories),
+    )
+
+
+def filter_review_state_by_repository_eligibility(
+    *,
+    baseline_repositories: set[str],
+    manual_review: ManualReviewState,
+    eligible_repositories: set[str],
+    population: Sequence[repository.RepositoryCandidate],
+) -> EligibilityFilteredReviewState:
+    """Validate reviewed repository metadata before applying an eligibility policy."""
+    available = {candidate.repository.casefold() for candidate in population}
+    reviewed = {name.casefold() for name in baseline_repositories}
+    reviewed.update(manual_review.confirmed_repositories)
+    reviewed.update(manual_review.rejected_repositories)
+    missing = sorted(reviewed.difference(available))
+    if missing:
+        raise ValueError(f"reviewed repository is absent from the candidate population: {missing[0]}")
+    eligible = {name.casefold() for name in eligible_repositories}
+    filtered_baseline = frozenset(name for name in baseline_repositories if name.casefold() in eligible)
+    filtered_manual = ManualReviewState(
+        confirmed_repositories=manual_review.confirmed_repositories.intersection(eligible),
+        rejected_repositories=manual_review.rejected_repositories.intersection(eligible),
+    )
+    ineligible_accepted = {name.casefold() for name in baseline_repositories if name.casefold() not in eligible}
+    ineligible_accepted.update(manual_review.confirmed_repositories.difference(eligible))
+    return EligibilityFilteredReviewState(
+        reviewed_baseline_repositories=frozenset(baseline_repositories),
+        baseline_repositories=filtered_baseline,
+        manual_review=filtered_manual,
+        eligible_repositories=frozenset(eligible),
+        ineligible_accepted_repositories=frozenset(ineligible_accepted),
     )
 
 

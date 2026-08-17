@@ -140,6 +140,25 @@ def test_license_allowlist_always_rejects_blank_and_other_license_names(tmp_path
     ]
 
 
+def test_loaded_license_allowlist_reuses_the_human_policy_for_collection(tmp_path: Path) -> None:
+    allowlist_path = tmp_path / "license_allowlist.csv"
+    _write_csv(
+        allowlist_path,
+        ("license_name",),
+        (
+            {"license_name": "MIT License"},
+            {"license_name": "Other"},
+        ),
+    )
+
+    allowlist = guideline_license.load_license_allowlist(allowlist_path)
+
+    assert allowlist.allows("MIT License")
+    assert not allowlist.allows("GNU GPL v3.0")
+    assert not allowlist.allows("Other")
+    assert not allowlist.allows("")
+
+
 def test_license_review_reports_repository_and_license_name_counts(tmp_path: Path) -> None:
     input_dir = tmp_path / "candidates"
     _write_candidates(

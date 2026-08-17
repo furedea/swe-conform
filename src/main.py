@@ -7,7 +7,7 @@ import logging
 import os
 import subprocess
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import batch_runner
@@ -229,6 +229,7 @@ def _add_guideline_finalization_arguments(
     parser.add_argument("--collection-dir", type=Path, required=True)
     parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
     parser.add_argument("--human-checklist", type=Path, required=True)
+    parser.add_argument("--license-allowlist-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
 
 
@@ -246,6 +247,7 @@ def _add_guideline_collection_arguments(
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
     parser.add_argument("--exclude-csv", type=Path, action="append", required=True)
+    parser.add_argument("--license-allowlist-csv", type=Path, required=True)
     parser.add_argument(
         "--human-checklist",
         type=Path,
@@ -732,6 +734,7 @@ def _finalize_guideline_collection(arguments: argparse.Namespace) -> None:
         collection_dir=arguments.collection_dir,
         baseline_checklist_paths=tuple(arguments.baseline_checklist),
         human_checklist_path=arguments.human_checklist,
+        license_allowlist_path=arguments.license_allowlist_csv,
         output_dir=arguments.output_dir,
     )
     payload = {
@@ -754,7 +757,15 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     )
     baseline_checklists = tuple(arguments.baseline_checklist)
     exclude_csvs = tuple(arguments.exclude_csv)
-    baseline_repositories = guideline_collection.load_baseline_repositories(baseline_checklists)
+    license_allowlist, review_state = _license_filtered_collection_review(
+        candidates=candidates,
+        baseline_checklists=baseline_checklists,
+        human_checklist=arguments.human_checklist,
+        license_allowlist_path=arguments.license_allowlist_csv,
+    )
+    license_eligible_repositories = set(review_state.eligible_repositories)
+    baseline_repositories = set(review_state.baseline_repositories)
+    manual_review = review_state.manual_review
     baseline_repository_counts = guideline_collection.baseline_repository_counts_by_language(
         baseline_repositories,
         population=candidates,
@@ -766,20 +777,22 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         baseline_repository_counts,
         target_total_repositories=arguments.target_total_repositories,
     )
-    manual_review = guideline_collection.load_manual_review_state(arguments.human_checklist)
     excluded_repositories = repository_sampling.load_excluded_repositories(exclude_csvs)
     excluded_repositories.update(arguments.exclude_repository)
     guideline_collection.validate_baseline_exclusions(
-        baseline_repositories,
+        set(review_state.reviewed_baseline_repositories),
         excluded_repositories=excluded_repositories,
     )
-    schedule = repository_sampling.stratified_schedule(
-        candidates,
+    complete_schedule, schedule = _license_filtered_collection_schedules(
+        candidates=candidates,
         sample_seed=arguments.sample_seed,
         excluded_repositories=excluded_repositories,
+        license_eligible_repositories=license_eligible_repositories,
+        baseline_repository_counts=baseline_repository_counts,
+        target_total_repositories=arguments.target_total_repositories,
     )
     configuration = {
-        "schema_version": 3,
+        "schema_version": 4,
         "repository_source": arguments.repository_source,
         "sampling_method": "stratified_random_per_language_until_quota",
         "sampling_unit": "repository",
@@ -793,6 +806,12 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "input_fingerprints": _input_fingerprints(arguments.input_dir),
         "baseline_checklist_fingerprints": _path_fingerprints(baseline_checklists),
         "exclude_csv_fingerprints": _path_fingerprints(exclude_csvs),
+        "license_allowlist_fingerprints": _path_fingerprints((arguments.license_allowlist_csv,)),
+        "license_allowlist": sorted(license_allowlist.license_names, key=str.casefold),
+        "license_ineligible_reviewed_repositories": sorted(
+            review_state.ineligible_accepted_repositories,
+            key=str.casefold,
+        ),
         "classification_contract_sha256": markdown_batch.classification_contract_sha256(),
         "filter": markdown_filename_audit.filter_configuration(),
         "provider": arguments.provider,
@@ -818,7 +837,10 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     store = guideline_collection.RepositoryCollectionStore(arguments.output_dir, configuration=configuration)
     store.initialize()
     guideline_collection.validate_manual_review_state(manual_review, store=store)
-    repository_sampling.write_stratified_schedule(arguments.output_dir / "sampling_manifest.csv", schedule)
+    repository_sampling.write_stratified_schedule(
+        arguments.output_dir / "sampling_manifest.csv",
+        complete_schedule,
+    )
     github: github_client.GitHubClient | None = None
     github_source: github_repository.PersistentGitHubRepositoryClient | None = None
     if arguments.repository_source == "cache":
@@ -902,6 +924,9 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             review_output_checklist_path=arguments.review_output_checklist,
             max_screened_repositories=arguments.max_screened_repositories,
             screening_limit_reached=report.screening_limit_reached if report is not None else False,
+            license_ineligible_reviewed_repositories=len(
+                review_state.ineligible_accepted_repositories,
+            ),
             source_metrics=github_source.report_metrics if github_source is not None else None,
         )
         responses_client.close()
@@ -927,6 +952,9 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "processed_repositories": report.processed_repositories,
         "max_screened_repositories": arguments.max_screened_repositories,
         "screening_limit_reached": report.screening_limit_reached,
+        "license_ineligible_reviewed_repositories": len(
+            review_state.ineligible_accepted_repositories,
+        ),
         "target_reached": report.target_reached,
         "human_target_reached": report.human_target_reached,
         "output_dir": str(arguments.output_dir),
@@ -940,6 +968,54 @@ def _validate_collection_repository_source(arguments: argparse.Namespace) -> Non
         raise ValueError("--cache-root is required when --repository-source=cache")
     if arguments.repository_source == "github" and arguments.cache_root is not None:
         raise ValueError("--cache-root cannot be used when --repository-source=github")
+
+
+def _license_filtered_collection_review(
+    *,
+    candidates: Sequence[repository.RepositoryCandidate],
+    baseline_checklists: Sequence[Path],
+    human_checklist: Path | None,
+    license_allowlist_path: Path,
+) -> tuple[guideline_license.LicenseAllowlist, guideline_collection.EligibilityFilteredReviewState]:
+    allowlist = guideline_license.load_license_allowlist(license_allowlist_path)
+    eligible_repositories = {
+        candidate.repository.casefold() for candidate in candidates if allowlist.allows(candidate.license_name)
+    }
+    review_state = guideline_collection.filter_review_state_by_repository_eligibility(
+        baseline_repositories=guideline_collection.load_baseline_repositories(baseline_checklists),
+        manual_review=guideline_collection.load_manual_review_state(human_checklist),
+        eligible_repositories=eligible_repositories,
+        population=candidates,
+    )
+    return allowlist, review_state
+
+
+def _license_filtered_collection_schedules(
+    *,
+    candidates: Sequence[repository.RepositoryCandidate],
+    sample_seed: int,
+    excluded_repositories: set[str],
+    license_eligible_repositories: set[str],
+    baseline_repository_counts: Mapping[str, int],
+    target_total_repositories: int,
+) -> tuple[
+    tuple[repository_sampling.ScheduledRepository, ...],
+    tuple[repository_sampling.ScheduledRepository, ...],
+]:
+    complete = repository_sampling.stratified_schedule(
+        candidates,
+        sample_seed=sample_seed,
+        excluded_repositories=excluded_repositories,
+    )
+    eligible = tuple(
+        item for item in complete if item.candidate.repository.casefold() in license_eligible_repositories
+    )
+    guideline_collection.validate_schedule_covers_language_deficits(
+        eligible,
+        baseline_repository_counts=baseline_repository_counts,
+        target_total_repositories=target_total_repositories,
+    )
+    return complete, eligible
 
 
 def _audit_markdown(arguments: argparse.Namespace) -> None:

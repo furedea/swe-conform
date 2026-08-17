@@ -1,7 +1,9 @@
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
+from unittest.mock import MagicMock
 
 import pytest
 from pytest_mock import MockerFixture
@@ -20,6 +22,29 @@ import markdown_full_review
 import markdown_review
 import repository_sampling
 import repository_workspace
+
+
+@dataclass(frozen=True, slots=True)
+class _CacheCollectionScenario:
+    tmp_path: Path
+    candidates: tuple[MagicMock, ...]
+    scheduled: MagicMock
+    ineligible_scheduled: MagicMock
+    later_scheduled: MagicMock
+    load_allowlist: MagicMock
+    path_fingerprints: MagicMock
+    baseline_counts: dict[str, int]
+    count_baseline: MagicMock
+    schedule: MagicMock
+    validate_schedule: MagicMock
+    write_schedule: MagicMock
+    store_factory: MagicMock
+    store: MagicMock
+    validate_review: MagicMock
+    client: MagicMock
+    collect: MagicMock
+    write_reports: MagicMock
+    output: dict[str, object]
 
 
 def test_main() -> None:
@@ -258,6 +283,8 @@ def test_finalize_guideline_collection_accepts_all_review_sources() -> None:
             "experiments/baseline-2/checklist.csv",
             "--human-checklist",
             "experiments/collection/manual-review/checklist.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
             "--output-dir",
             "experiments/collection/final",
         ],
@@ -269,6 +296,9 @@ def test_finalize_guideline_collection_accepts_all_review_sources() -> None:
         Path("experiments/baseline-2/checklist.csv"),
     ]
     assert arguments.human_checklist == Path("experiments/collection/manual-review/checklist.csv")
+    assert arguments.license_allowlist_csv == Path(
+        "experiments/collection/license-review/license_allowlist.csv",
+    )
     assert arguments.output_dir == Path("experiments/collection/final")
 
 
@@ -301,6 +331,8 @@ def test_finalize_guideline_collection_prints_validated_counts(
             "experiments/baseline-2/checklist.csv",
             "--human-checklist",
             "experiments/collection/manual-review/checklist.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
             "--output-dir",
             "experiments/collection/final",
         ],
@@ -313,6 +345,9 @@ def test_finalize_guideline_collection_prints_validated_counts(
             Path("experiments/baseline-2/checklist.csv"),
         ),
         human_checklist_path=Path("experiments/collection/manual-review/checklist.csv"),
+        license_allowlist_path=Path(
+            "experiments/collection/license-review/license_allowlist.csv",
+        ),
         output_dir=Path("experiments/collection/final"),
     )
     assert json.loads(capsys.readouterr().out) == {
@@ -410,6 +445,8 @@ def test_collect_guideline_repositories_uses_the_fixed_collection_defaults() -> 
             "experiments/50/input/candidates.csv",
             "--exclude-csv",
             "experiments/20/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
         ],
     )
 
@@ -424,6 +461,45 @@ def test_collect_guideline_repositories_uses_the_fixed_collection_defaults() -> 
     assert len(arguments.exclude_csv) == 2
 
 
+def test_collect_guideline_repositories_accepts_a_human_license_allowlist() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
+        ],
+    )
+
+    assert arguments.license_allowlist_csv == Path(
+        "experiments/collection/license-review/license_allowlist.csv",
+    )
+
+
+def test_collect_guideline_repositories_requires_a_human_license_allowlist() -> None:
+    with pytest.raises(SystemExit):
+        main._parser().parse_args(
+            [
+                "collect-guideline-repositories",
+                "--repository-source",
+                "github",
+                "--output-dir",
+                "output/guideline-collection",
+                "--baseline-checklist",
+                "experiments/50/checklist_full.csv",
+                "--exclude-csv",
+                "experiments/50/input/candidates.csv",
+            ],
+        )
+
+
 def test_collect_guideline_repositories_accepts_github_without_a_cache_root() -> None:
     arguments = main._parser().parse_args(
         [
@@ -436,6 +512,8 @@ def test_collect_guideline_repositories_accepts_github_without_a_cache_root() ->
             "experiments/50/checklist_full.csv",
             "--exclude-csv",
             "experiments/50/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
         ],
     )
 
@@ -455,6 +533,8 @@ def test_collect_guideline_repositories_accepts_a_screening_cost_limit() -> None
             "experiments/50/checklist_full.csv",
             "--exclude-csv",
             "experiments/50/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
             "--max-screened-repositories",
             "200",
         ],
@@ -475,6 +555,8 @@ def test_collect_guideline_repositories_accepts_a_separate_next_round_checklist(
             "experiments/50/checklist_full.csv",
             "--exclude-csv",
             "experiments/50/input/candidates.csv",
+            "--license-allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
             "--human-checklist",
             "output/guideline-collection/manual-review/checklist_done.csv",
             "--review-output-checklist",
@@ -505,23 +587,76 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             str(tmp_path / "baseline.csv"),
             "--exclude-csv",
             str(tmp_path / "excluded.csv"),
+            "--license-allowlist-csv",
+            str(tmp_path / "license_allowlist.csv"),
             "--human-checklist",
             str(tmp_path / "checklist_done.csv"),
             "--review-output-checklist",
             str(tmp_path / "checklist_round_2.csv"),
         ],
     )
-    candidate = mocker.Mock(repository="new/project", revision="a" * 40)
+    baseline_candidate = mocker.Mock(
+        repository="baseline/project",
+        revision="b" * 40,
+        license_name="MIT License",
+    )
+    baseline_candidate.fields = {"mainLanguage": "Java"}
+    ineligible_baseline_candidate = mocker.Mock(
+        repository="baseline/ineligible",
+        revision="d" * 40,
+        license_name="GNU GPL v3.0",
+    )
+    ineligible_baseline_candidate.fields = {"mainLanguage": "Java"}
+    candidate = mocker.Mock(repository="new/project", revision="a" * 40, license_name="MIT License")
     candidate.fields = {"mainLanguage": "Java"}
+    ineligible_candidate = mocker.Mock(
+        repository="new/ineligible",
+        revision="c" * 40,
+        license_name="GNU GPL v3.0",
+    )
+    ineligible_candidate.fields = {"mainLanguage": "Java"}
+    later_candidate = mocker.Mock(
+        repository="new/later-project",
+        revision="e" * 40,
+        license_name="MIT License",
+    )
+    later_candidate.fields = {"mainLanguage": "Java"}
     scheduled = mocker.Mock(candidate=candidate, sample_order=1, round_number=1, language="Java")
     scheduled.language_population = 10
-    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=(candidate,))
+    ineligible_scheduled = mocker.Mock(
+        candidate=ineligible_candidate,
+        sample_order=2,
+        round_number=2,
+        language="Java",
+    )
+    ineligible_scheduled.language_population = 10
+    later_scheduled = mocker.Mock(
+        candidate=later_candidate,
+        sample_order=3,
+        round_number=3,
+        language="Java",
+    )
+    later_scheduled.language_population = 10
+    candidates = (
+        baseline_candidate,
+        ineligible_baseline_candidate,
+        candidate,
+        ineligible_candidate,
+        later_candidate,
+    )
+    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=candidates)
+    allowlist = main.guideline_license.LicenseAllowlist(frozenset({"MIT License"}))
+    load_allowlist = mocker.patch(
+        "main.guideline_license.load_license_allowlist",
+        autospec=True,
+        return_value=allowlist,
+    )
     mocker.patch("main._input_fingerprints", autospec=True, return_value={"population.csv": "hash"})
-    mocker.patch("main._path_fingerprints", autospec=True, return_value={})
+    path_fingerprints = mocker.patch("main._path_fingerprints", autospec=True, return_value={})
     mocker.patch(
         "main.guideline_collection.load_baseline_repositories",
         autospec=True,
-        return_value={"baseline/project"},
+        return_value={"baseline/project", "baseline/ineligible"},
     )
     baseline_counts = {
         "Java": 1,
@@ -542,9 +677,20 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     mocker.patch("main.guideline_collection.validate_baseline_exclusions", autospec=True)
     mocker.patch(
         "main.guideline_collection.load_manual_review_state", autospec=True
-    ).return_value = main.guideline_collection.ManualReviewState(set(), set())
-    mocker.patch("main.repository_sampling.stratified_schedule", autospec=True, return_value=(scheduled,))
-    mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
+    ).return_value = main.guideline_collection.ManualReviewState(
+        {"new/project", "new/ineligible"},
+        set(),
+    )
+    schedule = mocker.patch(
+        "main.repository_sampling.stratified_schedule",
+        autospec=True,
+        return_value=(scheduled, ineligible_scheduled, later_scheduled),
+    )
+    validate_schedule = mocker.patch(
+        "main.guideline_collection.validate_schedule_covers_language_deficits",
+        autospec=True,
+    )
+    write_schedule = mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
     store_factory = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True)
     store = store_factory.return_value
     validate_review = mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)
@@ -582,29 +728,81 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
 
     main._collect_guideline_repositories(arguments)
 
-    store.initialize.assert_called_once_with()
-    configuration = store_factory.call_args.kwargs["configuration"]
+    _assert_cache_collection_scenario(
+        _CacheCollectionScenario(
+            tmp_path=tmp_path,
+            candidates=candidates,
+            scheduled=scheduled,
+            ineligible_scheduled=ineligible_scheduled,
+            later_scheduled=later_scheduled,
+            load_allowlist=load_allowlist,
+            path_fingerprints=path_fingerprints,
+            baseline_counts=baseline_counts,
+            count_baseline=count_baseline,
+            schedule=schedule,
+            validate_schedule=validate_schedule,
+            write_schedule=write_schedule,
+            store_factory=store_factory,
+            store=store,
+            validate_review=validate_review,
+            client=client,
+            collect=collect,
+            write_reports=write_reports,
+            output=json.loads(capsys.readouterr().out),
+        ),
+    )
+
+
+def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> None:
+    scenario.store.initialize.assert_called_once_with()
+    configuration = scenario.store_factory.call_args.kwargs["configuration"]
     assert "max_screened_repositories" not in configuration
-    assert configuration["schema_version"] == 3
+    assert configuration["schema_version"] == 4
     assert configuration["sampling_method"] == "stratified_random_per_language_until_quota"
-    assert configuration["target_repositories_by_language"] == {
-        "Java": 30,
-        "JavaScript": 30,
-        "Python": 30,
-        "TypeScript": 30,
-    }
-    assert configuration["baseline_repositories_by_language"] == baseline_counts
-    validate_review.assert_called_once_with(main.guideline_collection.ManualReviewState(set(), set()), store=store)
-    count_baseline.assert_called_once_with({"baseline/project"}, population=(candidate,))
-    assert collect.call_args.kwargs["baseline_repository_counts"] == baseline_counts
-    assert write_reports.call_args.kwargs["baseline_repository_counts"] == baseline_counts
-    assert write_reports.call_args.kwargs["review_checklist_path"] == tmp_path / "checklist_done.csv"
-    assert write_reports.call_args.kwargs["review_output_checklist_path"] == tmp_path / "checklist_round_2.csv"
-    client.close.assert_called_once_with()
-    output = json.loads(capsys.readouterr().out)
-    assert output["target_repositories_by_language"] == dict.fromkeys(baseline_counts, 30)
-    assert output["selected_repositories_by_language"] == baseline_counts
-    assert output["remaining_repositories_by_language"] == {
+    assert configuration["license_allowlist"] == ["MIT License"]
+    assert configuration["license_ineligible_reviewed_repositories"] == [
+        "baseline/ineligible",
+        "new/ineligible",
+    ]
+    scenario.path_fingerprints.assert_any_call((scenario.tmp_path / "license_allowlist.csv",))
+    assert configuration["target_repositories_by_language"] == dict.fromkeys(scenario.baseline_counts, 30)
+    assert configuration["baseline_repositories_by_language"] == scenario.baseline_counts
+    eligible_manual_review = main.guideline_collection.ManualReviewState({"new/project"}, set())
+    scenario.validate_review.assert_called_once_with(eligible_manual_review, store=scenario.store)
+    scenario.load_allowlist.assert_called_once_with(scenario.tmp_path / "license_allowlist.csv")
+    scenario.count_baseline.assert_called_once_with(
+        {"baseline/project"},
+        population=scenario.candidates,
+    )
+    scenario.schedule.assert_called_once_with(
+        scenario.candidates,
+        sample_seed=20260807,
+        excluded_repositories={"baseline/project"},
+    )
+    scenario.validate_schedule.assert_called_once_with(
+        (scenario.scheduled, scenario.later_scheduled),
+        baseline_repository_counts=scenario.baseline_counts,
+        target_total_repositories=120,
+    )
+    scenario.write_schedule.assert_called_once_with(
+        scenario.tmp_path / "output" / "sampling_manifest.csv",
+        (scenario.scheduled, scenario.ineligible_scheduled, scenario.later_scheduled),
+    )
+    assert scenario.collect.call_args.args[0] == (scenario.scheduled, scenario.later_scheduled)
+    assert scenario.collect.call_args.kwargs["confirmed_repositories"] == {"new/project"}
+    assert scenario.collect.call_args.kwargs["baseline_repository_counts"] == scenario.baseline_counts
+    assert scenario.write_reports.call_args.kwargs["baseline_repository_counts"] == scenario.baseline_counts
+    assert scenario.write_reports.call_args.kwargs["license_ineligible_reviewed_repositories"] == 2
+    assert scenario.write_reports.call_args.kwargs["review_checklist_path"] == scenario.tmp_path / "checklist_done.csv"
+    assert (
+        scenario.write_reports.call_args.kwargs["review_output_checklist_path"]
+        == scenario.tmp_path / "checklist_round_2.csv"
+    )
+    scenario.client.close.assert_called_once_with()
+    assert scenario.output["license_ineligible_reviewed_repositories"] == 2
+    assert scenario.output["target_repositories_by_language"] == dict.fromkeys(scenario.baseline_counts, 30)
+    assert scenario.output["selected_repositories_by_language"] == scenario.baseline_counts
+    assert scenario.output["remaining_repositories_by_language"] == {
         "Java": 29,
         "JavaScript": 30,
         "Python": 30,
@@ -630,15 +828,32 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
             str(tmp_path / "baseline.csv"),
             "--exclude-csv",
             str(tmp_path / "excluded.csv"),
+            "--license-allowlist-csv",
+            str(tmp_path / "license_allowlist.csv"),
             "--max-screened-repositories",
             "200",
         ],
     )
-    candidate = mocker.Mock(repository="new/project", revision="a" * 40)
+    baseline_candidate = mocker.Mock(
+        repository="baseline/project",
+        revision="b" * 40,
+        license_name="MIT License",
+    )
+    baseline_candidate.fields = {"mainLanguage": "Java"}
+    candidate = mocker.Mock(repository="new/project", revision="a" * 40, license_name="MIT License")
     candidate.fields = {"mainLanguage": "Java"}
     scheduled = mocker.Mock(candidate=candidate, sample_order=1, round_number=1, language="Java")
     scheduled.language_population = 10
-    mocker.patch("main.repository.load_repository_candidates", autospec=True, return_value=(candidate,))
+    mocker.patch(
+        "main.repository.load_repository_candidates",
+        autospec=True,
+        return_value=(baseline_candidate, candidate),
+    )
+    mocker.patch(
+        "main.guideline_license.load_license_allowlist",
+        autospec=True,
+        return_value=main.guideline_license.LicenseAllowlist(frozenset({"MIT License"})),
+    )
     mocker.patch("main._input_fingerprints", autospec=True, return_value={"population.csv": "hash"})
     mocker.patch("main._path_fingerprints", autospec=True, return_value={})
     mocker.patch(
@@ -668,6 +883,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
         return_value=main.guideline_collection.ManualReviewState(set(), set()),
     )
     mocker.patch("main.repository_sampling.stratified_schedule", autospec=True, return_value=(scheduled,))
+    mocker.patch("main.guideline_collection.validate_schedule_covers_language_deficits", autospec=True)
     mocker.patch("main.repository_sampling.write_stratified_schedule", autospec=True)
     store = mocker.patch("main.guideline_collection.RepositoryCollectionStore", autospec=True).return_value
     mocker.patch("main.guideline_collection.validate_manual_review_state", autospec=True)

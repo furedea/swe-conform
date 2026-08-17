@@ -145,7 +145,10 @@ of positive repositories from Java, JavaScript, Python, and TypeScript. The
 command computes the human-confirmed baseline count in each language from the
 two file-level checklists, excludes every repository in both prior samples, and
 then follows the existing deterministic random order within each language from
-an explicitly selected repository source.
+an explicitly selected repository source. It generates that fixed order before
+applying the human-authored license allowlist, then counts and classifies only
+allowlisted repositories. This preserves the original random order while
+ensuring that every language quota contains only redistributable repositories.
 
 Use the HDD bare repositories for a cache-backed run:
 
@@ -159,6 +162,7 @@ uv run --frozen --env-file .env python src/main.py collect-guideline-repositorie
   --baseline-checklist experiments/control/manual-review/checklist_full.csv \
   --exclude-csv experiments/heldout/input/candidates.csv \
   --exclude-csv experiments/control/input/candidates.csv \
+  --license-allowlist-csv output/license-review/license_allowlist.csv \
   --exclude-repository revanced/revanced-patches \
   --provider bedrock \
   --bedrock-region us-east-1 \
@@ -177,6 +181,7 @@ uv run --frozen --env-file .env python src/main.py collect-guideline-repositorie
   --baseline-checklist experiments/control/manual-review/checklist_full.csv \
   --exclude-csv experiments/heldout/input/candidates.csv \
   --exclude-csv experiments/control/input/candidates.csv \
+  --license-allowlist-csv output/license-review/license_allowlist.csv \
   --max-screened-repositories 200 \
   --provider bedrock \
   --bedrock-region us-east-1 \
@@ -192,12 +197,14 @@ secondary rate-limit waits; file-classification requests remain concurrent.
 
 The default target is 120 repositories, or 30 repositories per language. The
 total target must divide evenly across the four languages, and a baseline
-language count must not exceed its target. If the supplied checklists contain
-the expected 34 baseline repositories, the per-language deficits sum to 86 new
-repositories. `pass` and semantic `review` file decisions make a repository
-positive. Technical failures never do. Model failures are attempted at most
-three times, retrieval failures at most twice, and repository-level failures at
-most three times by default. `input_too_large` is not retried.
+language count must not exceed its target. Only repositories whose reported
+license appears in the supplied human-authored allowlist consume a language
+quota. If all expected 34 baseline repositories are allowlisted, the deficits
+sum to 86 new repositories; otherwise, the deficits are recomputed by language
+after license filtering. `pass` and semantic `review` file decisions make a
+repository positive. Technical failures never do. Model failures are attempted
+at most three times, retrieval failures at most twice, and repository-level
+failures at most three times by default. `input_too_large` is not retried.
 
 `--max-screened-repositories` is an optional execution budget rather than part
 of the classification contract. The command stops before the next active
@@ -235,6 +242,22 @@ process new candidates. Existing retryable results are still resolved before
 the selection is finalized, so an earlier positive can replace a later pending
 positive without changing the random order. Existing file labels and earlier
 checklist rows are preserved.
+
+After all four language quotas are human-confirmed, materialize the final
+bundle with the same license allowlist used by collection:
+
+```console
+uv run --frozen python src/main.py finalize-guideline-collection \
+  --collection-dir output/guideline-collection \
+  --baseline-checklist experiments/heldout/manual-review/checklist_full.csv \
+  --baseline-checklist experiments/control/manual-review/checklist_full.csv \
+  --human-checklist output/guideline-collection/manual-review/checklist.csv \
+  --license-allowlist-csv output/license-review/license_allowlist.csv \
+  --output-dir output/guideline-collection/final
+```
+
+Finalization verifies the recorded allowlist fingerprint and includes the
+allowlist as a provenance source.
 
 The default execution uses four workers, `gpt-5.6-luna`, and `max` reasoning
 effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit

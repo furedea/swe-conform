@@ -19,6 +19,14 @@ _SCREENED_REPOSITORIES_FILENAME = "screened_repositories.csv"
 _SELECTED_REPOSITORIES_FILENAME = "selected_repositories.csv"
 _SUMMARY_FILENAME = "collection_summary.json"
 _UNRESOLVED_FILES_FILENAME = "unresolved_files.csv"
+_SELECTED_REPOSITORY_FIELDS = (
+    "repository",
+    "revision",
+    "sampling_language",
+    "license_name",
+    "origin",
+    "sample_order",
+)
 
 
 def write_collection_reports(
@@ -36,6 +44,7 @@ def write_collection_reports(
     review_output_checklist_path: Path | None = None,
     max_screened_repositories: int | None = None,
     screening_limit_reached: bool = False,
+    license_ineligible_reviewed_repositories: int = 0,
     source_metrics: Callable[[], Mapping[str, object]] | None = None,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
@@ -105,6 +114,7 @@ def write_collection_reports(
         unresolved_count=len(unresolved),
         max_screened_repositories=max_screened_repositories,
         screening_limit_reached=screening_limit_reached,
+        license_ineligible_reviewed_repositories=license_ineligible_reviewed_repositories,
         source_metrics=source_metrics() if source_metrics is not None else {},
     )
 
@@ -189,7 +199,7 @@ def _write_repository_reports(
     _write_csv(
         output_dir / _SELECTED_REPOSITORIES_FILENAME,
         selected_rows,
-        fallback_fields=("repository", "revision", "sampling_language", "origin", "sample_order"),
+        fallback_fields=_SELECTED_REPOSITORY_FIELDS,
     )
 
 
@@ -203,6 +213,7 @@ def _selected_repository_row(
         "repository": candidate.repository,
         "revision": candidate.revision,
         "sampling_language": result.scheduled.language,
+        "license_name": candidate.license_name,
         "origin": "new_confirmed" if candidate.repository.casefold() in confirmed_names else "new_pending",
         "sample_order": result.scheduled.sample_order,
     }
@@ -218,6 +229,7 @@ def _baseline_repository_row(
         "repository": repository_name,
         "revision": candidate.revision if candidate is not None else "",
         "sampling_language": candidate.fields.get("mainLanguage", "") if candidate is not None else "",
+        "license_name": candidate.license_name if candidate is not None else "",
         "origin": "baseline",
         "sample_order": "",
     }
@@ -239,6 +251,7 @@ def _write_summary(
     unresolved_count: int,
     max_screened_repositories: int | None,
     screening_limit_reached: bool,
+    license_ineligible_reviewed_repositories: int,
     source_metrics: Mapping[str, object],
 ) -> None:
     target_counts = guideline_collection.target_repository_counts_by_language(target_total)
@@ -265,6 +278,7 @@ def _write_summary(
             "processed_repositories": processed_count,
             "max_screened_repositories": max_screened_repositories,
             "screening_limit_reached": screening_limit_reached,
+            "license_ineligible_reviewed_repositories": license_ineligible_reviewed_repositories,
             "target_total_repositories": target_total,
             "target_repositories_by_language": target_counts,
             "baseline_repositories_by_language": dict(baseline_counts),
