@@ -102,6 +102,150 @@ def test_apply_guideline_checklist_writes_validated_review_outputs(
     }
 
 
+def test_prepare_guideline_license_review_accepts_all_review_sources() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "prepare-guideline-license-review",
+            "--input-dir",
+            "docs/repository-candidates",
+            "--baseline-checklist",
+            "experiments/baseline-1/checklist.csv",
+            "--baseline-checklist",
+            "experiments/baseline-2/checklist.csv",
+            "--human-checklist",
+            "experiments/collection/manual-review/checklist.csv",
+            "--output-dir",
+            "experiments/collection/license-review",
+        ],
+    )
+
+    assert arguments.input_dir == Path("docs/repository-candidates")
+    assert arguments.baseline_checklist == [
+        Path("experiments/baseline-1/checklist.csv"),
+        Path("experiments/baseline-2/checklist.csv"),
+    ]
+    assert arguments.human_checklist == Path("experiments/collection/manual-review/checklist.csv")
+    assert arguments.output_dir == Path("experiments/collection/license-review")
+
+
+def test_apply_guideline_license_allowlist_accepts_review_and_policy_files() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "apply-guideline-license-allowlist",
+            "--repository-licenses-csv",
+            "experiments/collection/license-review/repository_licenses.csv",
+            "--allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
+            "--output-dir",
+            "experiments/collection/license-review/applied",
+        ],
+    )
+
+    assert arguments.repository_licenses_csv == Path(
+        "experiments/collection/license-review/repository_licenses.csv",
+    )
+    assert arguments.allowlist_csv == Path("experiments/collection/license-review/license_allowlist.csv")
+    assert arguments.output_dir == Path("experiments/collection/license-review/applied")
+
+
+def test_prepare_guideline_license_review_prints_repository_counts(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report = mocker.Mock(
+        repositories=120,
+        license_names=10,
+        blank_license_repositories=3,
+        other_license_repositories=12,
+        legacy_baseline_checklists=2,
+        output_dir=Path("experiments/collection/license-review"),
+    )
+    prepare = mocker.patch(
+        "main.guideline_license.prepare_license_review",
+        autospec=True,
+        return_value=report,
+    )
+
+    main.main(
+        [
+            "prepare-guideline-license-review",
+            "--input-dir",
+            "docs/repository-candidates",
+            "--baseline-checklist",
+            "experiments/baseline-1/checklist.csv",
+            "--baseline-checklist",
+            "experiments/baseline-2/checklist.csv",
+            "--human-checklist",
+            "experiments/collection/manual-review/checklist.csv",
+            "--output-dir",
+            "experiments/collection/license-review",
+        ],
+    )
+
+    prepare.assert_called_once_with(
+        input_dir=Path("docs/repository-candidates"),
+        baseline_checklist_paths=(
+            Path("experiments/baseline-1/checklist.csv"),
+            Path("experiments/baseline-2/checklist.csv"),
+        ),
+        human_checklist_path=Path("experiments/collection/manual-review/checklist.csv"),
+        output_dir=Path("experiments/collection/license-review"),
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "blank_license_repositories": 3,
+        "legacy_baseline_checklists": 2,
+        "license_names": 10,
+        "other_license_repositories": 12,
+        "output_dir": "experiments/collection/license-review",
+        "repositories": 120,
+    }
+
+
+def test_apply_guideline_license_allowlist_prints_selection_counts(
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report = mocker.Mock(
+        input_repositories=120,
+        accepted_repositories=105,
+        rejected_repositories=15,
+        allowlisted_license_names=4,
+        output_dir=Path("experiments/collection/license-review/applied"),
+    )
+    apply_allowlist = mocker.patch(
+        "main.guideline_license.apply_license_allowlist",
+        autospec=True,
+        return_value=report,
+    )
+
+    main.main(
+        [
+            "apply-guideline-license-allowlist",
+            "--repository-licenses-csv",
+            "experiments/collection/license-review/repository_licenses.csv",
+            "--allowlist-csv",
+            "experiments/collection/license-review/license_allowlist.csv",
+            "--output-dir",
+            "experiments/collection/license-review/applied",
+        ],
+    )
+
+    apply_allowlist.assert_called_once_with(
+        repository_licenses_path=Path(
+            "experiments/collection/license-review/repository_licenses.csv",
+        ),
+        allowlist_path=Path("experiments/collection/license-review/license_allowlist.csv"),
+        output_dir=Path("experiments/collection/license-review/applied"),
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "accepted_repositories": 105,
+        "allowlisted_license_names": 4,
+        "input_repositories": 120,
+        "output_dir": "experiments/collection/license-review/applied",
+        "rejected_repositories": 15,
+    }
+
+
 def test_finalize_guideline_collection_accepts_all_review_sources() -> None:
     arguments = main._parser().parse_args(
         [
