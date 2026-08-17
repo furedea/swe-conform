@@ -1,7 +1,8 @@
 # ADR-0003: Defer license review to humans
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-02
+- Superseded by: ADR-0019
 
 In the context of screening project-guideline candidates before human
 validation, facing a requirement that license eligibility remain a manual
