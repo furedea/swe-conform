@@ -42,6 +42,22 @@ def test_load_baseline_repositories_counts_each_repository_with_a_human_pass_onc
     assert repositories == {"example/one", "example/three"}
 
 
+def test_load_baseline_repositories_deduplicates_repository_names_case_insensitively(tmp_path: Path) -> None:
+    checklist = tmp_path / "checklist.csv"
+    _write_checklist(
+        checklist,
+        [
+            {"repository": "Example/One", "human_decision": "pass"},
+            {"repository": "example/one", "human_decision": "pass"},
+        ],
+    )
+
+    repositories = guideline_collection.load_baseline_repositories((checklist,))
+
+    assert len(repositories) == 1
+    assert {name.casefold() for name in repositories} == {"example/one"}
+
+
 def test_load_baseline_repositories_ignores_duplicate_human_passes(tmp_path: Path) -> None:
     checklist = tmp_path / "checklist.csv"
     with checklist.open("w", encoding="utf-8", newline="") as output_file:
@@ -64,6 +80,49 @@ def test_load_baseline_repositories_ignores_duplicate_human_passes(tmp_path: Pat
     repositories = guideline_collection.load_baseline_repositories((checklist,))
 
     assert repositories == {"example/canonical"}
+
+
+def test_baseline_repository_counts_are_derived_from_candidate_languages() -> None:
+    java = _scheduled_repository("Java", 1).candidate
+    python = _scheduled_repository("Python", 2).candidate
+
+    counts = guideline_collection.baseline_repository_counts_by_language(
+        {java.repository, python.repository},
+        population=(java, python),
+    )
+
+    assert counts == {
+        "Java": 1,
+        "JavaScript": 0,
+        "Python": 1,
+        "TypeScript": 0,
+    }
+
+
+def test_baseline_repository_counts_reject_a_repository_absent_from_the_population() -> None:
+    with pytest.raises(ValueError, match="absent from the candidate population"):
+        guideline_collection.baseline_repository_counts_by_language(
+            {"example/missing"},
+            population=(),
+        )
+
+
+def test_baseline_repository_counts_reject_conflicting_candidate_languages() -> None:
+    java = _scheduled_repository("Java", 1).candidate
+    conflicting = repository.RepositoryCandidate(
+        repository=java.repository.upper(),
+        revision=java.revision,
+        license_name=java.license_name,
+        source_file=java.source_file,
+        input_index=java.input_index,
+        fields={**java.fields, "mainLanguage": "Python"},
+    )
+
+    with pytest.raises(ValueError, match="candidate repository has conflicting languages"):
+        guideline_collection.baseline_repository_counts_by_language(
+            {java.repository},
+            population=(java, conflicting),
+        )
 
 
 def test_baseline_repositories_must_be_part_of_the_prior_sample_exclusions() -> None:
@@ -104,6 +163,27 @@ def test_manual_review_state_confirms_or_rejects_repositories_by_file_decisions(
 
     assert state.confirmed_repositories == {"example/pass"}
     assert state.rejected_repositories == {"example/duplicate-only", "example/rejected"}
+
+
+def test_manual_review_state_deduplicates_repository_names_case_insensitively(tmp_path: Path) -> None:
+    checklist = tmp_path / "checklist.csv"
+    with checklist.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(
+            output_file,
+            fieldnames=("repository", "file", "github_url", "human_decision", "duplicate_of"),
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                _manual_review_row("Example/Project", "first.md", "pass"),
+                _manual_review_row("example/project", "second.md", "pass"),
+            ],
+        )
+
+    state = guideline_collection.load_manual_review_state(checklist)
+
+    assert state.confirmed_repositories == {"example/project"}
+    assert state.rejected_repositories == set()
 
 
 def test_manual_review_repositories_must_have_a_persisted_positive_screening(tmp_path: Path) -> None:
@@ -222,21 +302,17 @@ def test_collection_store_retries_snapshot_failures_with_candidates_within_repos
     assert [result.scheduled.sample_order for result in retryable] == [1]
 
 
-def test_collection_stops_after_the_complete_round_that_reaches_the_new_target(
+def test_collection_processes_only_languages_below_their_repository_quota(
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     languages = repository_sampling.DEFAULT_LANGUAGES
     schedule = tuple(_scheduled_repository(languages[(order - 1) % len(languages)], order) for order in range(1, 9))
     statuses = {
-        1: "not_found",
-        2: "pass",
-        3: "unresolved",
-        4: "not_found",
-        5: "pass",
+        2: "not_found",
+        3: "pass",
+        4: "pass",
         6: "pass",
-        7: "not_found",
-        8: "not_found",
     }
     processor = mocker.Mock()
     processor.process.side_effect = lambda item: guideline_collection.RepositoryScreening(
@@ -248,19 +324,89 @@ def test_collection_stops_after_the_complete_round_that_reaches_the_new_target(
 
     report = guideline_collection.collect_repositories(
         schedule,
-        baseline_repository_count=1,
-        target_total_repositories=3,
+        baseline_repository_counts={
+            "Java": 1,
+            "JavaScript": 0,
+            "Python": 0,
+            "TypeScript": 0,
+        },
+        target_total_repositories=4,
         store=store,
         processor=processor,
         workers=4,
     )
 
-    assert processor.process.call_count == 8
-    assert [result.scheduled.sample_order for result in store.selected(2)] == [2, 5]
-    assert report.new_repository_target == 2
-    assert report.selected_new_repositories == 2
-    assert report.processed_repositories == 8
+    assert sorted(call.args[0].sample_order for call in processor.process.call_args_list) == [2, 3, 4, 6]
     assert report.target_reached is True
+
+
+def test_collection_report_includes_repository_counts_for_each_language(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    languages = repository_sampling.DEFAULT_LANGUAGES
+    schedule = tuple(_scheduled_repository(language, order) for order, language in enumerate(languages, start=1))
+    processor = mocker.Mock()
+    processor.process.side_effect = lambda item: guideline_collection.RepositoryScreening(item, status="pass")
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    report = guideline_collection.collect_repositories(
+        schedule,
+        baseline_repository_counts=dict.fromkeys(languages, 0),
+        target_total_repositories=4,
+        store=store,
+        processor=processor,
+        workers=4,
+    )
+
+    assert report.target_repositories_by_language == dict.fromkeys(languages, 1)
+    assert report.baseline_repositories_by_language == dict.fromkeys(languages, 0)
+    assert report.confirmed_new_repositories_by_language == dict.fromkeys(languages, 0)
+    assert report.pending_new_repositories_by_language == dict.fromkeys(languages, 1)
+    assert report.selected_repositories_by_language == dict.fromkeys(languages, 1)
+    assert report.remaining_repositories_by_language == dict.fromkeys(languages, 0)
+
+
+def test_collection_rejects_a_target_that_cannot_be_divided_equally_by_language(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    with pytest.raises(ValueError, match="divide evenly"):
+        guideline_collection.collect_repositories(
+            (),
+            baseline_repository_counts=dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, 0),
+            target_total_repositories=5,
+            store=store,
+            processor=mocker.Mock(),
+            workers=1,
+        )
+
+
+def test_collection_rejects_a_baseline_that_exceeds_a_language_target(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+
+    with pytest.raises(ValueError, match="baseline repository count exceeds"):
+        guideline_collection.collect_repositories(
+            (),
+            baseline_repository_counts={
+                "Java": 2,
+                "JavaScript": 0,
+                "Python": 0,
+                "TypeScript": 0,
+            },
+            target_total_repositories=4,
+            store=store,
+            processor=mocker.Mock(),
+            workers=1,
+        )
 
 
 def test_collection_stops_before_a_stratified_round_would_exceed_the_screening_limit(
@@ -279,7 +425,12 @@ def test_collection_stops_before_a_stratified_round_would_exceed_the_screening_l
 
     report = guideline_collection.collect_repositories(
         schedule,
-        baseline_repository_count=34,
+        baseline_repository_counts={
+            "Java": 6,
+            "JavaScript": 6,
+            "Python": 10,
+            "TypeScript": 12,
+        },
         target_total_repositories=120,
         store=store,
         processor=processor,
@@ -315,8 +466,8 @@ def test_collection_retries_unresolved_repositories_before_freezing_selection(
 
     guideline_collection.collect_repositories(
         schedule,
-        baseline_repository_count=0,
-        target_total_repositories=1,
+        baseline_repository_counts=dict.fromkeys(languages, 0),
+        target_total_repositories=4,
         store=store,
         processor=processor,
         workers=4,
@@ -364,8 +515,13 @@ def test_collection_retries_file_errors_before_finishing_a_human_complete_collec
 
     guideline_collection.collect_repositories(
         (scheduled,),
-        baseline_repository_count=0,
-        target_total_repositories=1,
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
         confirmed_repositories={scheduled.candidate.repository},
         store=store,
         processor=processor,
@@ -373,6 +529,49 @@ def test_collection_retries_file_errors_before_finishing_a_human_complete_collec
     )
 
     processor.process.assert_called_once_with(scheduled)
+
+
+def test_collection_retry_replaces_a_later_pending_repository_in_the_same_language(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    schedule = tuple(
+        _scheduled_repository(repository_sampling.DEFAULT_LANGUAGES[(order - 1) % 4], order) for order in range(1, 9)
+    )
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(schedule[0], status="unresolved", retryable=True))
+    store.append(guideline_collection.RepositoryScreening(schedule[4], status="pass"))
+    processor = mocker.Mock()
+    processor.process.return_value = guideline_collection.RepositoryScreening(schedule[0], status="pass")
+
+    report = guideline_collection.collect_repositories(
+        schedule,
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
+        store=store,
+        processor=processor,
+        workers=1,
+    )
+
+    processor.process.assert_called_once_with(schedule[0])
+    assert report.pending_new_repositories_by_language["Java"] == 1
+    assert [
+        result.scheduled.sample_order
+        for result in store.selected_by_language(
+            {
+                "Java": 1,
+                "JavaScript": 0,
+                "Python": 0,
+                "TypeScript": 0,
+            },
+        )
+    ] == [1]
 
 
 def test_repository_screening_uses_the_checkpoint_to_detect_retryable_file_errors(tmp_path: Path) -> None:
@@ -443,31 +642,33 @@ def test_collection_replaces_human_rejected_repositories_from_the_same_schedule(
     tmp_path: Path,
 ) -> None:
     languages = repository_sampling.DEFAULT_LANGUAGES
-    schedule = tuple(_scheduled_repository(languages[(order - 1) % len(languages)], order) for order in range(1, 5))
+    schedule = tuple(_scheduled_repository(languages[(order - 1) % len(languages)], order) for order in range(1, 9))
     processor = mocker.Mock()
     processor.process.side_effect = lambda item: guideline_collection.RepositoryScreening(item, status="pass")
     store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
     store.initialize()
+    for item in schedule[:4]:
+        store.append(guideline_collection.RepositoryScreening(item, status="pass"))
 
     report = guideline_collection.collect_repositories(
         schedule,
-        baseline_repository_count=1,
-        target_total_repositories=3,
-        confirmed_repositories={"owner-java/project-1"},
+        baseline_repository_counts=dict.fromkeys(languages, 0),
+        target_total_repositories=4,
+        confirmed_repositories={
+            "owner-java/project-1",
+            "owner-python/project-3",
+            "owner-typescript/project-4",
+        },
         rejected_repositories={"owner-javascript/project-2"},
         store=store,
         processor=processor,
         workers=4,
     )
 
-    pending = store.selected(
-        1,
-        excluded_repositories={"owner-java/project-1", "owner-javascript/project-2"},
-    )
-    assert [result.scheduled.sample_order for result in pending] == [3]
-    assert report.confirmed_new_repositories == 1
+    processor.process.assert_called_once_with(schedule[5])
+    assert report.confirmed_new_repositories == 3
     assert report.pending_new_repositories == 1
-    assert report.selected_new_repositories == 2
+    assert report.selected_new_repositories == 4
 
 
 def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
@@ -517,8 +718,14 @@ def test_collection_reports_keep_all_file_decisions_and_review_positive_files(
         output_dir=tmp_path,
         population=(scheduled.candidate,),
         store=store,
-        baseline_repositories={"baseline/project"},
-        target_total_repositories=2,
+        baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
         repository_client=repository_client,
         max_screened_repositories=200,
         screening_limit_reached=True,
@@ -579,8 +786,14 @@ def test_collection_file_reports_follow_sampling_and_candidate_order(
         output_dir=tmp_path,
         population=(scheduled.candidate,),
         store=store,
-        baseline_repositories=set(),
-        target_total_repositories=1,
+        baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
         repository_client=repository_client,
     )
 
@@ -604,15 +817,80 @@ def test_selected_repository_report_keeps_confirmed_and_pending_rows_in_sampling
         output_dir=tmp_path,
         population=(first.candidate, second.candidate),
         store=store,
-        baseline_repositories=set(),
-        target_total_repositories=2,
+        baseline_repositories={"baseline/javascript", "baseline/typescript"},
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 0,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
         repository_client=mocker.Mock(),
         confirmed_repositories={second.candidate.repository},
     )
 
     with (tmp_path / "selected_repositories.csv").open(encoding="utf-8", newline="") as input_file:
-        repositories = [row["repository"] for row in csv.DictReader(input_file)]
+        repositories = [row["repository"] for row in csv.DictReader(input_file) if row["origin"].startswith("new_")]
     assert repositories == [first.candidate.repository, second.candidate.repository]
+
+
+def test_collection_reports_select_the_language_quota_and_report_its_counts(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    languages = repository_sampling.DEFAULT_LANGUAGES
+    scheduled = tuple(
+        _scheduled_repository(language, order) for order, language in enumerate((*languages, "Java"), start=1)
+    )
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    for item in scheduled:
+        store.append(guideline_collection.RepositoryScreening(item, status="pass"))
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=tuple(item.candidate for item in scheduled),
+        store=store,
+        baseline_repositories=set(),
+        baseline_repository_counts=dict.fromkeys(languages, 0),
+        target_total_repositories=4,
+        repository_client=mocker.Mock(),
+    )
+
+    with (tmp_path / "selected_repositories.csv").open(encoding="utf-8", newline="") as input_file:
+        selected = list(csv.DictReader(input_file))
+    summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
+    assert [row["repository"] for row in selected] == [item.candidate.repository for item in scheduled[:4]]
+    assert summary["confirmed_new_repositories_by_language"] == dict.fromkeys(languages, 0)
+    assert summary["pending_new_repositories_by_language"] == dict.fromkeys(languages, 1)
+    assert summary["selected_repositories_by_language"] == dict.fromkeys(languages, 1)
+
+
+def test_collection_reports_reject_confirmed_repositories_above_a_language_quota(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    scheduled = _scheduled_repository("Java", 1)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(scheduled, status="pass"))
+
+    with pytest.raises(ValueError, match="confirmed repositories exceed a language target"):
+        guideline_collection_reports.write_collection_reports(
+            output_dir=tmp_path,
+            population=(scheduled.candidate,),
+            store=store,
+            baseline_repositories={"baseline/java"},
+            baseline_repository_counts={
+                "Java": 1,
+                "JavaScript": 0,
+                "Python": 0,
+                "TypeScript": 0,
+            },
+            target_total_repositories=4,
+            repository_client=mocker.Mock(),
+            confirmed_repositories={scheduled.candidate.repository},
+        )
 
 
 def test_collection_reports_rebuild_compact_file_views_from_repository_checkpoints(
@@ -639,8 +917,14 @@ def test_collection_reports_rebuild_compact_file_views_from_repository_checkpoin
         output_dir=tmp_path,
         population=(scheduled.candidate,),
         store=store,
-        baseline_repositories=set(),
-        target_total_repositories=1,
+        baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
         repository_client=repository_client,
     )
 
@@ -681,8 +965,14 @@ def test_collection_reports_reject_candidate_repositories_without_a_checkpoint(
             output_dir=tmp_path,
             population=(scheduled.candidate,),
             store=store,
-            baseline_repositories=set(),
-            target_total_repositories=1,
+            baseline_repositories={"baseline/javascript", "baseline/python", "baseline/typescript"},
+            baseline_repository_counts={
+                "Java": 0,
+                "JavaScript": 1,
+                "Python": 1,
+                "TypeScript": 1,
+            },
+            target_total_repositories=4,
             repository_client=mocker.Mock(),
         )
 
@@ -705,8 +995,14 @@ def test_collection_reports_use_the_completed_checklist_as_the_next_round_source
         output_dir=tmp_path,
         population=(),
         store=store,
-        baseline_repositories=set(),
-        target_total_repositories=0,
+        baseline_repositories={
+            "baseline/java",
+            "baseline/javascript",
+            "baseline/python",
+            "baseline/typescript",
+        },
+        baseline_repository_counts=dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, 1),
+        target_total_repositories=4,
         repository_client=repository_client,
         review_checklist_path=completed_checklist,
         review_output_checklist_path=next_checklist,

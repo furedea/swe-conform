@@ -1,7 +1,8 @@
 # ADR-0012: Collect stratified repositories until the positive target
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-13
+- Superseded by: ADR-0020
 
 In the context of constructing a 120-repository benchmark where 34 repositories
 from two prior stratified samples are already human-confirmed, facing the cost

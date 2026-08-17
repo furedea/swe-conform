@@ -693,6 +693,17 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     baseline_checklists = tuple(arguments.baseline_checklist)
     exclude_csvs = tuple(arguments.exclude_csv)
     baseline_repositories = guideline_collection.load_baseline_repositories(baseline_checklists)
+    baseline_repository_counts = guideline_collection.baseline_repository_counts_by_language(
+        baseline_repositories,
+        population=candidates,
+    )
+    target_repository_counts = guideline_collection.target_repository_counts_by_language(
+        arguments.target_total_repositories,
+    )
+    guideline_collection.validate_baseline_repository_counts_by_language(
+        baseline_repository_counts,
+        target_total_repositories=arguments.target_total_repositories,
+    )
     manual_review = guideline_collection.load_manual_review_state(arguments.human_checklist)
     excluded_repositories = repository_sampling.load_excluded_repositories(exclude_csvs)
     excluded_repositories.update(arguments.exclude_repository)
@@ -706,14 +717,16 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         excluded_repositories=excluded_repositories,
     )
     configuration = {
-        "schema_version": 2,
+        "schema_version": 3,
         "repository_source": arguments.repository_source,
-        "sampling_method": "stratified_random_round_robin_until_target",
+        "sampling_method": "stratified_random_per_language_until_quota",
         "sampling_unit": "repository",
         "sample_seed": arguments.sample_seed,
         "languages": list(repository_sampling.DEFAULT_LANGUAGES),
         "target_total_repositories": arguments.target_total_repositories,
+        "target_repositories_by_language": target_repository_counts,
         "baseline_repositories": sorted(baseline_repositories, key=str.casefold),
+        "baseline_repositories_by_language": baseline_repository_counts,
         "excluded_repositories": sorted(excluded_repositories, key=str.casefold),
         "input_fingerprints": _input_fingerprints(arguments.input_dir),
         "baseline_checklist_fingerprints": _path_fingerprints(baseline_checklists),
@@ -802,7 +815,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     try:
         report = guideline_collection.collect_repositories(
             schedule,
-            baseline_repository_count=len(baseline_repositories),
+            baseline_repository_counts=baseline_repository_counts,
             target_total_repositories=arguments.target_total_repositories,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
@@ -818,6 +831,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             population=candidates,
             store=store,
             baseline_repositories=baseline_repositories,
+            baseline_repository_counts=baseline_repository_counts,
             target_total_repositories=arguments.target_total_repositories,
             repository_client=repository_client,
             confirmed_repositories=manual_review.confirmed_repositories,
@@ -842,6 +856,12 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "rejected_new_repositories": len(manual_review.rejected_repositories),
         "selected_new_repositories": report.selected_new_repositories,
         "selected_total_repositories": report.baseline_repositories + report.selected_new_repositories,
+        "target_repositories_by_language": report.target_repositories_by_language,
+        "baseline_repositories_by_language": report.baseline_repositories_by_language,
+        "confirmed_new_repositories_by_language": report.confirmed_new_repositories_by_language,
+        "pending_new_repositories_by_language": report.pending_new_repositories_by_language,
+        "selected_repositories_by_language": report.selected_repositories_by_language,
+        "remaining_repositories_by_language": report.remaining_repositories_by_language,
         "processed_repositories": report.processed_repositories,
         "max_screened_repositories": arguments.max_screened_repositories,
         "screening_limit_reached": report.screening_limit_reached,

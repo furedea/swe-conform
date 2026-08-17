@@ -2,10 +2,10 @@
 
 import csv
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -85,6 +85,12 @@ class RepositoryCollectionReport:
     target_reached: bool
     human_target_reached: bool
     screening_limit_reached: bool = False
+    target_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
+    baseline_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
+    confirmed_new_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
+    pending_new_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
+    selected_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
+    remaining_repositories_by_language: Mapping[str, int] = field(default_factory=dict)
 
 
 ManualReviewState = guideline_review.GuidelineReviewState
@@ -219,6 +225,28 @@ class RepositoryCollectionStore:
             if result.scheduled.candidate.repository.casefold() not in excluded
         )[:limit]
 
+    def selected_by_language(
+        self,
+        limits: Mapping[str, int],
+        *,
+        excluded_repositories: set[str] | None = None,
+    ) -> tuple[RepositoryScreening, ...]:
+        """Return the first positive repositories up to each language limit."""
+        if any(limit < 0 for limit in limits.values()):
+            raise ValueError("language limits must not be negative")
+        excluded = {name.casefold() for name in excluded_repositories or ()}
+        counts: Counter[str] = Counter()
+        selected = []
+        for result in self.results():
+            language = result.scheduled.language
+            if result.status != "pass" or result.scheduled.candidate.repository.casefold() in excluded:
+                continue
+            if counts[language] >= limits.get(language, 0):
+                continue
+            selected.append(result)
+            counts[language] += 1
+        return tuple(selected)
+
     def completed_orders(self) -> set[int]:
         """Return sampling positions with at least one persisted outcome."""
         return set(self._results)
@@ -285,20 +313,50 @@ class RepositoryCollectionStore:
 
 def load_baseline_repositories(paths: Sequence[Path]) -> set[str]:
     """Return repositories with at least one human-confirmed file."""
-    repositories: set[str] = set()
+    repositories: dict[str, str] = {}
     for path in paths:
         with path.open(encoding="utf-8", newline="") as input_file:
             reader = csv.DictReader(input_file)
             fields = set(reader.fieldnames or ())
             if not {"repository", "human_decision"}.issubset(fields):
                 raise ValueError(f"baseline checklist must contain repository and human_decision columns: {path}")
-            repositories.update(
-                row["repository"].strip()
-                for row in reader
-                if row["human_decision"].strip() == "pass" and row["repository"].strip()
-                if not row.get("duplicate_of", "").strip()
-            )
-    return repositories
+            for row in reader:
+                repository_name = row["repository"].strip()
+                if (
+                    row["human_decision"].strip() == "pass"
+                    and repository_name
+                    and not row.get("duplicate_of", "").strip()
+                ):
+                    repositories.setdefault(repository_name.casefold(), repository_name)
+    return set(repositories.values())
+
+
+def baseline_repository_counts_by_language(
+    baseline_repositories: set[str],
+    *,
+    population: Sequence[repository.RepositoryCandidate],
+) -> dict[str, int]:
+    """Count baseline repositories by their candidate language stratum."""
+    candidates_by_name: dict[str, repository.RepositoryCandidate] = {}
+    for candidate in population:
+        repository_key = candidate.repository.casefold()
+        existing = candidates_by_name.get(repository_key)
+        if existing is not None and existing.fields.get("mainLanguage", "") != candidate.fields.get(
+            "mainLanguage",
+            "",
+        ):
+            raise ValueError(f"candidate repository has conflicting languages: {candidate.repository}")
+        candidates_by_name.setdefault(repository_key, candidate)
+    counts = dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, 0)
+    for repository_name in baseline_repositories:
+        candidate = candidates_by_name.get(repository_name.casefold())
+        if candidate is None:
+            raise ValueError(f"baseline repository is absent from the candidate population: {repository_name}")
+        language = candidate.fields.get("mainLanguage", "")
+        if language not in counts:
+            raise ValueError(f"baseline repository has an unsupported language: {repository_name}")
+        counts[language] += 1
+    return counts
 
 
 def validate_baseline_exclusions(
@@ -315,7 +373,11 @@ def validate_baseline_exclusions(
 
 def load_manual_review_state(path: Path | None) -> ManualReviewState:
     """Aggregate completed file-level human decisions."""
-    return guideline_review.load_completed_review_state(path)
+    state = guideline_review.load_completed_review_state(path)
+    return ManualReviewState(
+        confirmed_repositories=_normalized_repository_names(state.confirmed_repositories),
+        rejected_repositories=_normalized_repository_names(state.rejected_repositories),
+    )
 
 
 def validate_manual_review_state(
@@ -336,7 +398,7 @@ def validate_manual_review_state(
 def collect_repositories(
     schedule: Sequence[repository_sampling.ScheduledRepository],
     *,
-    baseline_repository_count: int,
+    baseline_repository_counts: Mapping[str, int],
     target_total_repositories: int,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
@@ -346,33 +408,45 @@ def collect_repositories(
     max_repository_attempts: int = 3,
     max_screened_repositories: int | None = None,
 ) -> RepositoryCollectionReport:
-    """Process complete stratified rounds until enough repositories are positive."""
-    new_target = target_total_repositories - baseline_repository_count
-    confirmed = set(confirmed_repositories or ())
-    rejected = set(rejected_repositories or ())
-    _validate_collection_parameters(
-        baseline_repository_count=baseline_repository_count,
+    """Process each fixed language order until every language reaches its quota."""
+    confirmed = _normalized_repository_names(confirmed_repositories or set())
+    rejected = _normalized_repository_names(rejected_repositories or set())
+    target_counts = target_repository_counts_by_language(target_total_repositories)
+    new_targets = new_repository_targets_by_language(
+        baseline_repository_counts,
         target_total_repositories=target_total_repositories,
+    )
+    confirmed_counts = _repository_counts_by_language(confirmed, schedule=schedule)
+    _validate_collection_parameters(
         confirmed_repositories=confirmed,
         rejected_repositories=rejected,
         workers=workers,
         max_repository_attempts=max_repository_attempts,
         max_screened_repositories=max_screened_repositories,
     )
-    remaining_target = new_target - len(confirmed)
+    remaining_targets = remaining_repository_targets_by_language(new_targets, confirmed_counts=confirmed_counts)
     reviewed = confirmed | rejected
     rounds: defaultdict[int, list[repository_sampling.ScheduledRepository]] = defaultdict(list)
     for item in schedule:
         rounds[item.round_number].append(item)
     screening_limit_reached = False
     for round_number in sorted(rounds):
-        if len(store.selected(remaining_target, excluded_repositories=reviewed)) >= remaining_target:
+        pending = store.selected_by_language(remaining_targets, excluded_repositories=reviewed)
+        pending_counts = Counter(result.scheduled.language for result in pending)
+        active_languages = {
+            language for language, limit in remaining_targets.items() if pending_counts[language] < limit
+        }
+        if not active_languages:
             break
-        pending = tuple(item for item in rounds[round_number] if item.sample_order not in store.completed_orders())
-        if max_screened_repositories is not None and len(store.results()) + len(pending) > max_screened_repositories:
+        next_wave = tuple(
+            item
+            for item in rounds[round_number]
+            if item.language in active_languages and item.sample_order not in store.completed_orders()
+        )
+        if max_screened_repositories is not None and len(store.results()) + len(next_wave) > max_screened_repositories:
             screening_limit_reached = True
             break
-        _process_repositories(pending, processor=processor, store=store, workers=workers)
+        _process_repositories(next_wave, processor=processor, store=store, workers=workers)
     while True:
         retryable = store.retryable(max_attempts=max_repository_attempts)
         if not retryable:
@@ -383,8 +457,31 @@ def collect_repositories(
             store=store,
             workers=workers,
         )
-    pending = store.selected(remaining_target, excluded_repositories=reviewed)
-    target_reached = len(confirmed) + len(pending) >= new_target
+    pending = store.selected_by_language(remaining_targets, excluded_repositories=reviewed)
+    pending_counts = Counter(result.scheduled.language for result in pending)
+    target_reached = all(
+        pending_counts[language] >= remaining_targets[language] for language in repository_sampling.DEFAULT_LANGUAGES
+    )
+    human_target_reached = all(
+        confirmed_counts.get(language, 0) >= new_targets[language]
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    )
+    baseline_repository_count = sum(baseline_repository_counts.values())
+    new_target = sum(new_targets.values())
+    confirmed_counts_by_language = {
+        language: confirmed_counts.get(language, 0) for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    pending_counts_by_language = {
+        language: pending_counts.get(language, 0) for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    selected_counts = {
+        language: (
+            baseline_repository_counts[language]
+            + confirmed_counts_by_language[language]
+            + pending_counts_by_language[language]
+        )
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    }
     return RepositoryCollectionReport(
         baseline_repositories=baseline_repository_count,
         new_repository_target=new_target,
@@ -393,25 +490,28 @@ def collect_repositories(
         selected_new_repositories=len(confirmed) + len(pending),
         processed_repositories=len(store.results()),
         target_reached=target_reached,
-        human_target_reached=len(confirmed) >= new_target,
+        human_target_reached=human_target_reached,
         screening_limit_reached=screening_limit_reached and not target_reached,
+        target_repositories_by_language=target_counts,
+        baseline_repositories_by_language=dict(baseline_repository_counts),
+        confirmed_new_repositories_by_language=confirmed_counts_by_language,
+        pending_new_repositories_by_language=pending_counts_by_language,
+        selected_repositories_by_language=selected_counts,
+        remaining_repositories_by_language={
+            language: target_counts[language] - selected_counts[language]
+            for language in repository_sampling.DEFAULT_LANGUAGES
+        },
     )
 
 
 def _validate_collection_parameters(
     *,
-    baseline_repository_count: int,
-    target_total_repositories: int,
     confirmed_repositories: set[str],
     rejected_repositories: set[str],
     workers: int,
     max_repository_attempts: int,
     max_screened_repositories: int | None,
 ) -> None:
-    if baseline_repository_count < 0:
-        raise ValueError("baseline_repository_count must not be negative")
-    if target_total_repositories < baseline_repository_count:
-        raise ValueError("target_total_repositories must include every baseline repository")
     if workers < 1:
         raise ValueError("workers must be at least 1")
     if max_repository_attempts < 1:
@@ -422,9 +522,82 @@ def _validate_collection_parameters(
         name.casefold() for name in rejected_repositories
     ):
         raise ValueError("confirmed and rejected repositories must be disjoint")
-    new_target = target_total_repositories - baseline_repository_count
-    if len(confirmed_repositories) > new_target:
-        raise ValueError("confirmed repositories exceed the new repository target")
+
+
+def target_repository_count_per_language(target_total_repositories: int) -> int:
+    """Return an equal per-language target or reject an indivisible total."""
+    language_count = len(repository_sampling.DEFAULT_LANGUAGES)
+    target_per_language, remainder = divmod(target_total_repositories, language_count)
+    if not target_per_language or remainder:
+        raise ValueError("target_total_repositories must divide evenly across configured languages")
+    return target_per_language
+
+
+def target_repository_counts_by_language(target_total_repositories: int) -> dict[str, int]:
+    """Return the equal target for every configured language."""
+    target_per_language = target_repository_count_per_language(target_total_repositories)
+    return dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, target_per_language)
+
+
+def new_repository_targets_by_language(
+    baseline_repository_counts: Mapping[str, int],
+    *,
+    target_total_repositories: int,
+) -> dict[str, int]:
+    """Return new-repository targets after validating baseline counts."""
+    validate_baseline_repository_counts_by_language(
+        baseline_repository_counts,
+        target_total_repositories=target_total_repositories,
+    )
+    target_counts = target_repository_counts_by_language(target_total_repositories)
+    return {language: target - baseline_repository_counts[language] for language, target in target_counts.items()}
+
+
+def validate_baseline_repository_counts_by_language(
+    baseline_repository_counts: Mapping[str, int],
+    *,
+    target_total_repositories: int,
+) -> None:
+    """Reject baseline counts that cannot fit the equal language targets."""
+    target_counts = target_repository_counts_by_language(target_total_repositories)
+    if set(baseline_repository_counts) != set(target_counts):
+        raise ValueError("baseline_repository_counts must contain every configured language")
+    if any(count < 0 for count in baseline_repository_counts.values()):
+        raise ValueError("baseline repository counts must not be negative")
+    if any(baseline_repository_counts[language] > target for language, target in target_counts.items()):
+        raise ValueError("baseline repository count exceeds the language target")
+
+
+def remaining_repository_targets_by_language(
+    new_repository_targets: Mapping[str, int],
+    *,
+    confirmed_counts: Mapping[str, int],
+) -> dict[str, int]:
+    """Return pending targets after validating human-confirmed counts."""
+    if any(confirmed_counts.get(language, 0) > target for language, target in new_repository_targets.items()):
+        raise ValueError("confirmed repositories exceed a language target")
+    return {
+        language: target - confirmed_counts.get(language, 0) for language, target in new_repository_targets.items()
+    }
+
+
+def _repository_counts_by_language(
+    repositories: set[str],
+    *,
+    schedule: Sequence[repository_sampling.ScheduledRepository],
+) -> Counter[str]:
+    languages_by_repository = {item.candidate.repository.casefold(): item.language for item in schedule}
+    counts: Counter[str] = Counter()
+    for repository_name in repositories:
+        language = languages_by_repository.get(repository_name.casefold())
+        if language is None:
+            raise ValueError(f"reviewed repository is absent from the sampling schedule: {repository_name}")
+        counts[language] += 1
+    return counts
+
+
+def _normalized_repository_names(repositories: set[str]) -> set[str]:
+    return {name.strip().casefold() for name in repositories if name.strip()}
 
 
 def _process_repositories(

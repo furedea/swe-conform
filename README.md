@@ -140,11 +140,12 @@ settings, size limit, and cache-safety options are unchanged.
 ## Target-based stratified collection
 
 Use the integrated collection command to continue the prior 50- and
-20-repository stratified samples until the benchmark contains 120 positive
-repositories. The command computes the human-confirmed baseline from the two
-file-level checklists, excludes every repository in both prior samples, and then
-processes deterministic four-language rounds from an explicitly selected
-repository source.
+20-repository stratified samples until the benchmark contains an equal number
+of positive repositories from Java, JavaScript, Python, and TypeScript. The
+command computes the human-confirmed baseline count in each language from the
+two file-level checklists, excludes every repository in both prior samples, and
+then follows the existing deterministic random order within each language from
+an explicitly selected repository source.
 
 Use the HDD bare repositories for a cache-backed run:
 
@@ -189,16 +190,18 @@ content filtering, LLM classification, resumption, and manual-review export
 reuse those files. GitHub REST requests are serialized and honor primary and
 secondary rate-limit waits; file-classification requests remain concurrent.
 
-The default target is 120 repositories. If the supplied checklists contain the
-expected 34 baseline repositories, the command selects 86 new repositories.
-`pass` and semantic `review` file decisions make a repository positive.
-Technical failures never do. Model failures are attempted at most three times,
-retrieval failures at most twice, and repository-level failures at most three
-times by default. `input_too_large` is not retried.
+The default target is 120 repositories, or 30 repositories per language. The
+total target must divide evenly across the four languages, and a baseline
+language count must not exceed its target. If the supplied checklists contain
+the expected 34 baseline repositories, the per-language deficits sum to 86 new
+repositories. `pass` and semantic `review` file decisions make a repository
+positive. Technical failures never do. Model failures are attempted at most
+three times, retrieval failures at most twice, and repository-level failures at
+most three times by default. `input_too_large` is not retried.
 
 `--max-screened-repositories` is an optional execution budget rather than part
-of the classification contract. The command stops before a complete
-four-language round would exceed the limit. If the target is not reached,
+of the classification contract. The command stops before the next active
+language wave would exceed the limit. If a language target is not reached,
 increase the limit and reuse the same output directory to continue from the
 existing checkpoints.
 
@@ -226,8 +229,12 @@ checklist, add the following argument:
 
 A repository is human-confirmed when at least one of its candidate files is
 `pass`. It is rejected only when every listed positive file is `not_found`.
-Rejected repositories are replaced by continuing the original fixed sampling
-schedule; existing file labels and earlier checklist rows are preserved.
+Rejected repositories are replaced by continuing only the deficient
+language's original fixed order; languages that already meet their quota do not
+process new candidates. Existing retryable results are still resolved before
+the selection is finalized, so an earlier positive can replace a later pending
+positive without changing the random order. Existing file labels and earlier
+checklist rows are preserved.
 
 The default execution uses four workers, `gpt-5.6-luna`, and `max` reasoning
 effort. Use `--workers`, `--model`, and `--reasoning-effort` to make an explicit

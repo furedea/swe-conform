@@ -344,6 +344,7 @@ def test_collect_guideline_repositories_accepts_a_separate_next_round_checklist(
 
 
 def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
+    capsys: pytest.CaptureFixture[str],
     mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
@@ -378,6 +379,17 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
         autospec=True,
         return_value={"baseline/project"},
     )
+    baseline_counts = {
+        "Java": 1,
+        "JavaScript": 0,
+        "Python": 0,
+        "TypeScript": 0,
+    }
+    count_baseline = mocker.patch(
+        "main.guideline_collection.baseline_repository_counts_by_language",
+        autospec=True,
+        return_value=baseline_counts,
+    )
     mocker.patch(
         "main.repository_sampling.load_excluded_repositories",
         autospec=True,
@@ -409,6 +421,17 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             processed_repositories=1,
             target_reached=False,
             human_target_reached=False,
+            target_repositories_by_language=dict.fromkeys(baseline_counts, 30),
+            baseline_repositories_by_language=baseline_counts,
+            confirmed_new_repositories_by_language=dict.fromkeys(baseline_counts, 0),
+            pending_new_repositories_by_language=dict.fromkeys(baseline_counts, 0),
+            selected_repositories_by_language=baseline_counts,
+            remaining_repositories_by_language={
+                "Java": 29,
+                "JavaScript": 30,
+                "Python": 30,
+                "TypeScript": 30,
+            },
         ),
     )
     write_reports = mocker.patch("main.guideline_collection_reports.write_collection_reports", autospec=True)
@@ -416,13 +439,33 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
     main._collect_guideline_repositories(arguments)
 
     store.initialize.assert_called_once_with()
-    assert "max_screened_repositories" not in store_factory.call_args.kwargs["configuration"]
+    configuration = store_factory.call_args.kwargs["configuration"]
+    assert "max_screened_repositories" not in configuration
+    assert configuration["schema_version"] == 3
+    assert configuration["sampling_method"] == "stratified_random_per_language_until_quota"
+    assert configuration["target_repositories_by_language"] == {
+        "Java": 30,
+        "JavaScript": 30,
+        "Python": 30,
+        "TypeScript": 30,
+    }
+    assert configuration["baseline_repositories_by_language"] == baseline_counts
     validate_review.assert_called_once_with(main.guideline_collection.ManualReviewState(set(), set()), store=store)
-    collect.assert_called_once()
-    write_reports.assert_called_once()
+    count_baseline.assert_called_once_with({"baseline/project"}, population=(candidate,))
+    assert collect.call_args.kwargs["baseline_repository_counts"] == baseline_counts
+    assert write_reports.call_args.kwargs["baseline_repository_counts"] == baseline_counts
     assert write_reports.call_args.kwargs["review_checklist_path"] == tmp_path / "checklist_done.csv"
     assert write_reports.call_args.kwargs["review_output_checklist_path"] == tmp_path / "checklist_round_2.csv"
     client.close.assert_called_once_with()
+    output = json.loads(capsys.readouterr().out)
+    assert output["target_repositories_by_language"] == dict.fromkeys(baseline_counts, 30)
+    assert output["selected_repositories_by_language"] == baseline_counts
+    assert output["remaining_repositories_by_language"] == {
+        "Java": 29,
+        "JavaScript": 30,
+        "Python": 30,
+        "TypeScript": 30,
+    }
 
 
 def test_collect_guideline_repositories_runs_the_github_file_pipeline(
@@ -458,6 +501,16 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
         "main.guideline_collection.load_baseline_repositories",
         autospec=True,
         return_value={"baseline/project"},
+    )
+    mocker.patch(
+        "main.guideline_collection.baseline_repository_counts_by_language",
+        autospec=True,
+        return_value={
+            "Java": 1,
+            "JavaScript": 0,
+            "Python": 0,
+            "TypeScript": 0,
+        },
     )
     mocker.patch(
         "main.repository_sampling.load_excluded_repositories",

@@ -224,6 +224,7 @@ def _validate_repository_sets(
     target = configuration.get("target_total_repositories")
     if not isinstance(target, int) or len(selected) != target:
         raise ValueError(f"selected repository count does not match target: {len(selected)} != {target}")
+    _validate_repository_language_counts(configuration, selected=selected)
     selected_by_origin = {
         origin: {row["repository"].strip().casefold() for row in selected if row["origin"] == origin}
         for origin in ("baseline", "new")
@@ -241,6 +242,32 @@ def _validate_repository_sets(
     for origin in ("baseline", "new"):
         if selected_by_origin[origin] != accepted_by_origin[origin]:
             raise ValueError(f"selected {origin} repositories do not match human-accepted repositories")
+
+
+def _validate_repository_language_counts(
+    configuration: Mapping[str, object],
+    *,
+    selected: Sequence[Mapping[str, str]],
+) -> None:
+    targets = configuration.get("target_repositories_by_language")
+    if targets is None:
+        return
+    languages = configuration.get("languages")
+    if not isinstance(targets, dict) or not isinstance(languages, list):
+        raise ValueError("collection configuration has invalid language targets")
+    parsed_targets: dict[str, int] = {}
+    for language, count in targets.items():
+        if not isinstance(language, str) or not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("collection configuration has invalid language targets")
+        parsed_targets[language] = count
+    if set(parsed_targets) != {str(language) for language in languages}:
+        raise ValueError("collection configuration has invalid language targets")
+    if sum(parsed_targets.values()) != configuration["target_total_repositories"]:
+        raise ValueError("collection configuration has invalid language targets")
+    expected = Counter(parsed_targets)
+    actual = Counter(row["sampling_language"] for row in selected)
+    if actual != expected:
+        raise ValueError("selected repository language counts do not match target")
 
 
 def _guideline_rows(

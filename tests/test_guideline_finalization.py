@@ -162,6 +162,31 @@ def test_selected_repository_without_an_accepted_guideline_is_rejected(tmp_path:
     assert not inputs.output_dir.exists()
 
 
+def test_new_collection_configuration_rejects_unbalanced_selected_languages(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["target_repositories_by_language"] = {"Java": 1, "Python": 1}
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    selected_path = inputs.collection_dir / "selected_repositories.csv"
+    selected_rows = _read_csv(selected_path)
+    selected_rows[0]["sampling_language"] = "Java"
+    _write_csv(selected_path, tuple(selected_rows))
+
+    with pytest.raises(ValueError, match="selected repository language counts do not match target"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
 def test_changed_baseline_checklist_is_rejected_by_its_recorded_fingerprint(tmp_path: Path) -> None:
     inputs = _valid_inputs(tmp_path)
     with inputs.baseline_path.open("a", encoding="utf-8") as output_file:

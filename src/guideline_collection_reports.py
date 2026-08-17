@@ -2,6 +2,7 @@
 
 import csv
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def write_collection_reports(
     population: Sequence[repository.RepositoryCandidate],
     store: guideline_collection.RepositoryCollectionStore,
     baseline_repositories: set[str],
+    baseline_repository_counts: Mapping[str, int],
     target_total_repositories: int,
     repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
@@ -37,15 +39,25 @@ def write_collection_reports(
     source_metrics: Callable[[], Mapping[str, object]] | None = None,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
-    new_target = target_total_repositories - len(baseline_repositories)
+    new_targets = guideline_collection.new_repository_targets_by_language(
+        baseline_repository_counts,
+        target_total_repositories=target_total_repositories,
+    )
     confirmed = set(confirmed_repositories or ())
     rejected = set(rejected_repositories or ())
-    remaining_target = new_target - len(confirmed)
-    pending = store.selected(remaining_target, excluded_repositories=confirmed | rejected)
     confirmed_names = {name.casefold() for name in confirmed}
     confirmed_results = tuple(
         result for result in store.results() if result.scheduled.candidate.repository.casefold() in confirmed_names
     )
+    confirmed_counter = Counter(result.scheduled.language for result in confirmed_results)
+    confirmed_counts = {language: confirmed_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
+    remaining_targets = guideline_collection.remaining_repository_targets_by_language(
+        new_targets,
+        confirmed_counts=confirmed_counts,
+    )
+    pending = store.selected_by_language(remaining_targets, excluded_repositories=confirmed | rejected)
+    pending_counter = Counter(result.scheduled.language for result in pending)
+    pending_counts = {language: pending_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
     selected = tuple(
         sorted(
             (*confirmed_results, *pending),
@@ -80,9 +92,11 @@ def write_collection_reports(
     )
     _write_summary(
         output_dir=output_dir,
-        baseline_count=len(baseline_repositories),
+        baseline_counts=baseline_repository_counts,
         confirmed_count=len(confirmed),
+        confirmed_counts=confirmed_counts,
         pending_count=len(pending),
+        pending_counts=pending_counts,
         rejected_count=len(rejected),
         processed_count=len(store.results()),
         target_total=target_total_repositories,
@@ -212,9 +226,11 @@ def _baseline_repository_row(
 def _write_summary(
     *,
     output_dir: Path,
-    baseline_count: int,
+    baseline_counts: Mapping[str, int],
     confirmed_count: int,
+    confirmed_counts: Mapping[str, int],
     pending_count: int,
+    pending_counts: Mapping[str, int],
     rejected_count: int,
     processed_count: int,
     target_total: int,
@@ -225,6 +241,16 @@ def _write_summary(
     screening_limit_reached: bool,
     source_metrics: Mapping[str, object],
 ) -> None:
+    target_counts = guideline_collection.target_repository_counts_by_language(target_total)
+    selected_counts = {
+        language: baseline_counts[language] + confirmed_counts.get(language, 0) + pending_counts.get(language, 0)
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    remaining_counts = {
+        language: target_counts[language] - selected_counts[language]
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    baseline_count = sum(baseline_counts.values())
     new_target = target_total - baseline_count
     _write_json(
         output_dir / _SUMMARY_FILENAME,
@@ -240,8 +266,17 @@ def _write_summary(
             "max_screened_repositories": max_screened_repositories,
             "screening_limit_reached": screening_limit_reached,
             "target_total_repositories": target_total,
-            "target_reached": confirmed_count + pending_count >= new_target,
-            "human_target_reached": confirmed_count >= new_target,
+            "target_repositories_by_language": target_counts,
+            "baseline_repositories_by_language": dict(baseline_counts),
+            "confirmed_new_repositories_by_language": dict(confirmed_counts),
+            "pending_new_repositories_by_language": dict(pending_counts),
+            "selected_repositories_by_language": selected_counts,
+            "remaining_repositories_by_language": remaining_counts,
+            "target_reached": all(not count for count in remaining_counts.values()),
+            "human_target_reached": all(
+                baseline_counts[language] + confirmed_counts.get(language, 0) >= target_counts[language]
+                for language in repository_sampling.DEFAULT_LANGUAGES
+            ),
             "classified_files": len(file_rows),
             "manual_review_files": sum(row["status"] in {"pass", "review"} for row in selected_file_rows),
             "unresolved_files": unresolved_count,
