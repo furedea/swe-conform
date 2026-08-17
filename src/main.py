@@ -22,6 +22,7 @@ import guideline_collection
 import guideline_collection_reports
 import guideline_finalization
 import guideline_license
+import guideline_organization
 import guideline_review
 import guideline_workflow
 import markdown_audit
@@ -96,6 +97,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_dataset_command(arguments)
     elif arguments.command == "collect-guideline-repositories":
         _collect_guideline_repositories(arguments)
+    elif arguments.command == "organize-guidelines":
+        _organize_guidelines(arguments)
     elif arguments.command == "audit-markdown":
         _audit_markdown(arguments)
     elif arguments.command == "audit-markdown-filenames":
@@ -205,6 +208,52 @@ def _add_guideline_workflow_arguments(
     _add_guideline_license_arguments(subparsers)
     _add_guideline_finalization_arguments(subparsers)
     _add_guideline_collection_arguments(subparsers)
+    _add_guideline_organization_arguments(subparsers)
+
+
+def _add_guideline_organization_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    settings = markdown_batch.PROJECT_RULE_CLASSIFICATION_SETTINGS
+    parser = subparsers.add_parser(
+        "organize-guidelines",
+        help="Extract and independently select source-backed project rules",
+    )
+    actions = parser.add_subparsers(dest="organization_action", required=True)
+    prepare = actions.add_parser("prepare", help="Resolve selected repositories and prepare extraction requests")
+    prepare.add_argument("--guideline-files-csv", type=Path, required=True)
+    prepare.add_argument("--repository-list", type=Path, required=True)
+    prepare.add_argument("--source-root", type=Path, required=True)
+    prepare.add_argument("--output-dir", type=Path, required=True)
+    prepare.add_argument("--expected-repositories", type=_positive_integer, default=12)
+    prepare.add_argument("--model", default=settings.model)
+    prepare.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=settings.reasoning_effort,
+    )
+    prepare.add_argument("--max-output-tokens", type=_positive_integer, default=settings.max_output_tokens)
+    run = actions.add_parser("run", help="Run one prepared extraction or judgment stage")
+    run.add_argument("--output-dir", type=Path, required=True)
+    run.add_argument("--stage", choices=("extraction", "judgment"), required=True)
+    run.add_argument(
+        "--provider",
+        choices=tuple(provider.value for provider in responses_provider.ResponsesProvider),
+        default=settings.provider.value,
+    )
+    run.add_argument(
+        "--bedrock-region",
+        choices=responses_provider.BEDROCK_LUNA_REGIONS,
+        default=settings.region,
+    )
+    run.add_argument("--workers", type=_positive_integer, default=settings.workers)
+    prepare_judgment = actions.add_parser(
+        "prepare-judgment",
+        help="Validate extraction responses and prepare independent judgments",
+    )
+    prepare_judgment.add_argument("--output-dir", type=Path, required=True)
+    finalize = actions.add_parser("finalize", help="Materialize selected rules and human-review checklists")
+    finalize.add_argument("--output-dir", type=Path, required=True)
 
 
 def _add_guideline_review_arguments(
@@ -1235,6 +1284,62 @@ def _initialized_collection_store(
     store = guideline_collection.RepositoryCollectionStore(output_dir, configuration=configuration)
     store.initialize()
     return store
+
+
+def _organize_guidelines(arguments: argparse.Namespace) -> None:
+    if arguments.organization_action == "prepare":
+        report = guideline_organization.prepare_extraction(
+            guideline_files_path=arguments.guideline_files_csv,
+            repository_list_path=arguments.repository_list,
+            source_root=arguments.source_root,
+            output_dir=arguments.output_dir,
+            expected_repositories=arguments.expected_repositories,
+            model=arguments.model,
+            reasoning_effort=arguments.reasoning_effort,
+            max_output_tokens=arguments.max_output_tokens,
+        )
+        payload = {
+            "repositories": report.repositories,
+            "files": report.files,
+            "output_dir": str(report.output_dir),
+        }
+    elif arguments.organization_action == "run":
+        client = _classification_client(arguments)
+        try:
+            result = guideline_organization.run_stage(
+                output_dir=arguments.output_dir,
+                stage=arguments.stage,
+                client=client,
+                provider=arguments.provider,
+                region=(
+                    arguments.bedrock_region
+                    if arguments.provider == responses_provider.ResponsesProvider.BEDROCK.value
+                    else None
+                ),
+                workers=arguments.workers,
+            )
+        finally:
+            client.close()
+        payload = dict(result)
+        payload["stage"] = arguments.stage
+        payload["output_dir"] = str(arguments.output_dir)
+    elif arguments.organization_action == "prepare-judgment":
+        judgment = guideline_organization.prepare_judgment(output_dir=arguments.output_dir)
+        payload = {
+            "sources": judgment.sources,
+            "candidates": judgment.candidates,
+            "output_dir": str(judgment.output_dir),
+        }
+    else:
+        finalization = guideline_organization.finalize_organization(output_dir=arguments.output_dir)
+        payload = {
+            "sources": finalization.sources,
+            "candidates": finalization.candidates,
+            "accepted": finalization.accepted,
+            "rejected": finalization.rejected,
+            "output_dir": str(finalization.output_dir),
+        }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
 
 def _audit_markdown(arguments: argparse.Namespace) -> None:

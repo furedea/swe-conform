@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "evidence_start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "evidence_end_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_end_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "constraint": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "evidence_start_line",
+          "evidence_end_line",
+          "context_start_line",
+          "context_end_line",
+          "constraint"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "candidates"
+  ],
+  "additionalProperties": false
+}

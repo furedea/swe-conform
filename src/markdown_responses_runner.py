@@ -1,4 +1,4 @@
-"""Concurrent per-file Markdown classification through a Responses API."""
+"""Concurrent prepared requests through a Responses API."""
 
 import hashlib
 import json
@@ -39,6 +39,29 @@ class ResponsesClient(Protocol):
         ...
 
 
+class ResultsCollector(Protocol):
+    """Persist and summarize raw Responses results for one workflow."""
+
+    def __call__(
+        self,
+        *,
+        output_dir: Path,
+        output_content: bytes,
+        error_content: bytes,
+        provider: str,
+    ) -> Mapping[str, object]:
+        """Return a workflow-specific result and cost summary."""
+        ...
+
+
+class ResponseValidator(Protocol):
+    """Validate one structured response before it becomes a successful checkpoint."""
+
+    def __call__(self, custom_id: str, response: openai_responses_client.JsonResponse) -> None:
+        """Raise when a response violates workflow-specific invariants."""
+        ...
+
+
 def run_prepared_classification(
     *,
     output_dir: Path,
@@ -48,6 +71,27 @@ def run_prepared_classification(
     workers: int,
 ) -> Mapping[str, object]:
     """Classify prepared files concurrently and persist each completed response."""
+    return run_prepared_responses(
+        output_dir=output_dir,
+        client=client,
+        provider=provider,
+        region=region,
+        workers=workers,
+        collect_results=markdown_batch.collect_precomputed_cost_pilot,
+    )
+
+
+def run_prepared_responses(
+    *,
+    output_dir: Path,
+    client: ResponsesClient,
+    provider: str,
+    region: str | None,
+    workers: int,
+    collect_results: ResultsCollector,
+    validate_response: ResponseValidator | None = None,
+) -> Mapping[str, object]:
+    """Execute prepared requests concurrently and delegate result materialization."""
     if workers < 1:
         msg = "workers must be at least 1"
         raise ValueError(msg)
@@ -74,14 +118,17 @@ def run_prepared_classification(
     started = time.perf_counter()
     concurrent_pending = pending
     if pending:
-        preflight_result = execute_request(client, pending[0])
+        preflight_result = execute_request(client, pending[0], validate_response=validate_response)
         preflight_id = str(preflight_result["custom_id"])
         _append_checkpoint(checkpoint_path, preflight_result)
         results[preflight_id] = preflight_result
         raise_for_fatal_preflight(preflight_result)
         concurrent_pending = pending[1:]
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(execute_request, client, request): request for request in concurrent_pending}
+        futures = {
+            executor.submit(execute_request, client, request, validate_response=validate_response): request
+            for request in concurrent_pending
+        }
         for future in as_completed(futures):
             result = future.result()
             custom_id = str(result["custom_id"])
@@ -93,7 +140,7 @@ def run_prepared_classification(
         results[custom_id] for custom_id in requests if custom_id in results and not _is_success(results[custom_id])
     )
     report = dict(
-        markdown_batch.collect_precomputed_cost_pilot(
+        collect_results(
             output_dir=output_dir,
             output_content=_jsonl_bytes(output_documents),
             error_content=_jsonl_bytes(error_documents),
@@ -123,12 +170,19 @@ def run_prepared_classification(
     return report
 
 
-def execute_request(client: ResponsesClient, request: Mapping[str, object]) -> Mapping[str, object]:
+def execute_request(
+    client: ResponsesClient,
+    request: Mapping[str, object],
+    *,
+    validate_response: ResponseValidator | None = None,
+) -> Mapping[str, object]:
     """Execute one provider-neutral request and capture its result or error."""
     custom_id = str(request.get("custom_id", ""))
     started = time.perf_counter()
     try:
         response = _complete_request(client, request)
+        if validate_response is not None:
+            validate_response(custom_id, response)
     except Exception as error:
         error_document: dict[str, object] = {
             "type": type(error).__name__,
