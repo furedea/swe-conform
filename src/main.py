@@ -20,6 +20,7 @@ import guideline_classifier
 import guideline_collection
 import guideline_collection_reports
 import guideline_finalization
+import guideline_license
 import guideline_review
 import markdown_audit
 import markdown_batch
@@ -69,6 +70,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif arguments.command in {
         "sample-repositories",
         "apply-guideline-checklist",
+        "prepare-guideline-license-review",
+        "apply-guideline-license-allowlist",
         "finalize-guideline-collection",
     }:
         _run_dataset_command(arguments)
@@ -91,6 +94,10 @@ def _run_dataset_command(arguments: argparse.Namespace) -> None:
         _sample_repositories(arguments)
     elif arguments.command == "apply-guideline-checklist":
         _apply_guideline_checklist(arguments)
+    elif arguments.command == "prepare-guideline-license-review":
+        _prepare_guideline_license_review(arguments)
+    elif arguments.command == "apply-guideline-license-allowlist":
+        _apply_guideline_license_allowlist(arguments)
     else:
         _finalize_guideline_collection(arguments)
 
@@ -176,6 +183,7 @@ def _add_guideline_workflow_arguments(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     _add_guideline_review_arguments(subparsers)
+    _add_guideline_license_arguments(subparsers)
     _add_guideline_finalization_arguments(subparsers)
     _add_guideline_collection_arguments(subparsers)
 
@@ -189,6 +197,26 @@ def _add_guideline_review_arguments(
     )
     parser.add_argument("--checklist-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+
+
+def _add_guideline_license_arguments(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    prepare = subparsers.add_parser(
+        "prepare-guideline-license-review",
+        help="List license names for human-accepted guideline repositories",
+    )
+    prepare.add_argument("--input-dir", type=Path, default=_DEFAULT_INPUT_DIR)
+    prepare.add_argument("--baseline-checklist", type=Path, action="append", required=True)
+    prepare.add_argument("--human-checklist", type=Path, required=True)
+    prepare.add_argument("--output-dir", type=Path, required=True)
+    apply = subparsers.add_parser(
+        "apply-guideline-license-allowlist",
+        help="Partition repositories through a human-authored license-name allowlist",
+    )
+    apply.add_argument("--repository-licenses-csv", type=Path, required=True)
+    apply.add_argument("--allowlist-csv", type=Path, required=True)
+    apply.add_argument("--output-dir", type=Path, required=True)
 
 
 def _add_guideline_finalization_arguments(
@@ -661,6 +689,40 @@ def _apply_guideline_checklist(arguments: argparse.Namespace) -> None:
         "output_dir": str(report.output_dir),
         "rejected_repositories": report.rejected_repositories,
         "reviewed_repositories": report.reviewed_repositories,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _prepare_guideline_license_review(arguments: argparse.Namespace) -> None:
+    report = guideline_license.prepare_license_review(
+        input_dir=arguments.input_dir,
+        baseline_checklist_paths=tuple(arguments.baseline_checklist),
+        human_checklist_path=arguments.human_checklist,
+        output_dir=arguments.output_dir,
+    )
+    payload = {
+        "blank_license_repositories": report.blank_license_repositories,
+        "legacy_baseline_checklists": report.legacy_baseline_checklists,
+        "license_names": report.license_names,
+        "other_license_repositories": report.other_license_repositories,
+        "output_dir": str(report.output_dir),
+        "repositories": report.repositories,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _apply_guideline_license_allowlist(arguments: argparse.Namespace) -> None:
+    report = guideline_license.apply_license_allowlist(
+        repository_licenses_path=arguments.repository_licenses_csv,
+        allowlist_path=arguments.allowlist_csv,
+        output_dir=arguments.output_dir,
+    )
+    payload = {
+        "accepted_repositories": report.accepted_repositories,
+        "allowlisted_license_names": report.allowlisted_license_names,
+        "input_repositories": report.input_repositories,
+        "output_dir": str(report.output_dir),
+        "rejected_repositories": report.rejected_repositories,
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
