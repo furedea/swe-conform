@@ -74,8 +74,15 @@ file, or does not contain the quote as an exact substring. Every verified file
 is copied byte-for-byte into the run output.
 
 License metadata from the candidate CSV is preserved unchanged in output
-reports. It is not classified and cannot exclude a repository. Project scope
-and license eligibility are reviewed manually after automated classification.
+reports and never changes the classifier's decision. In target-based
+collection, the classifier first fills the fixed per-language schedule
+provisionally without a license policy. A human then authors an allowlist from
+the reported license names of the provisional positives. Resuming the same
+collection applies that policy deterministically, excludes ineligible
+repositories from active selection, and continues each deficient language in
+its original fixed order. Only eligible positive files proceed to human scope
+review and only license-eligible, human-confirmed repositories count toward the
+final quotas.
 
 ## Reproducibility and recovery
 

@@ -263,6 +263,89 @@ def test_collection_without_the_recorded_license_policy_is_rejected(tmp_path: Pa
     assert not inputs.output_dir.exists()
 
 
+def test_pending_license_policy_is_rejected_before_outputs_are_written(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration["license_policy_status"] = "pending"
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="license policy must be applied before finalization"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_schema_five_requires_an_explicitly_applied_license_policy(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="license policy must be applied before finalization"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_applied_license_policy_in_schema_five_can_be_finalized(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration["license_policy_status"] = "applied"
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    assert report.repositories == 2
+    provenance = json.loads((inputs.output_dir / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["collection"]["license_policy_status"] == "applied"
+
+
+def test_schema_four_remains_finalizable_as_a_legacy_applied_policy(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    assert report.repositories == 2
+
+
 def test_collection_without_a_prior_collection_provenance_field_is_rejected(tmp_path: Path) -> None:
     inputs = _valid_inputs(tmp_path)
     configuration_path = inputs.collection_dir / "collection_configuration.json"

@@ -52,6 +52,18 @@ class _CacheCollectionScenario:
     output: dict[str, object]
 
 
+def _write_pending_collection(output_dir: Path, *, target_reached: bool = True) -> None:
+    output_dir.mkdir(parents=True)
+    (output_dir / "collection_configuration.json").write_text(
+        '{"license_policy_status":"pending"}\n',
+        encoding="utf-8",
+    )
+    (output_dir / "collection_summary.json").write_text(
+        json.dumps({"target_reached": target_reached}),
+        encoding="utf-8",
+    )
+
+
 def test_main() -> None:
     main.main([])
 
@@ -129,32 +141,24 @@ def test_apply_guideline_checklist_writes_validated_review_outputs(
         "output_dir": "experiments/collection/manual-review/applied-round-1",
         "rejected_repositories": 6,
         "reviewed_repositories": 86,
+        "status": "valid",
+        "advances_collection": False,
+        "next_action": "resume collection with this completed checklist",
     }
 
 
-def test_prepare_guideline_license_review_accepts_all_review_sources() -> None:
+def test_prepare_guideline_license_review_accepts_a_provisional_collection() -> None:
     arguments = main._parser().parse_args(
         [
             "prepare-guideline-license-review",
-            "--input-dir",
-            "docs/repository-candidates",
-            "--baseline-checklist",
-            "experiments/baseline-1/checklist.csv",
-            "--baseline-checklist",
-            "experiments/baseline-2/checklist.csv",
-            "--human-checklist",
-            "experiments/collection/manual-review/checklist.csv",
+            "--collection-dir",
+            "experiments/collection",
             "--output-dir",
             "experiments/collection/license-review",
         ],
     )
 
-    assert arguments.input_dir == Path("docs/repository-candidates")
-    assert arguments.baseline_checklist == [
-        Path("experiments/baseline-1/checklist.csv"),
-        Path("experiments/baseline-2/checklist.csv"),
-    ]
-    assert arguments.human_checklist == Path("experiments/collection/manual-review/checklist.csv")
+    assert arguments.collection_dir == Path("experiments/collection")
     assert arguments.output_dir == Path("experiments/collection/license-review")
 
 
@@ -187,11 +191,10 @@ def test_prepare_guideline_license_review_prints_repository_counts(
         license_names=10,
         blank_license_repositories=3,
         other_license_repositories=12,
-        legacy_baseline_checklists=2,
         output_dir=Path("experiments/collection/license-review"),
     )
     prepare = mocker.patch(
-        "main.guideline_license.prepare_license_review",
+        "main.guideline_license.prepare_collection_license_review",
         autospec=True,
         return_value=report,
     )
@@ -199,35 +202,25 @@ def test_prepare_guideline_license_review_prints_repository_counts(
     main.main(
         [
             "prepare-guideline-license-review",
-            "--input-dir",
-            "docs/repository-candidates",
-            "--baseline-checklist",
-            "experiments/baseline-1/checklist.csv",
-            "--baseline-checklist",
-            "experiments/baseline-2/checklist.csv",
-            "--human-checklist",
-            "experiments/collection/manual-review/checklist.csv",
+            "--collection-dir",
+            "experiments/collection",
             "--output-dir",
             "experiments/collection/license-review",
         ],
     )
 
     prepare.assert_called_once_with(
-        input_dir=Path("docs/repository-candidates"),
-        baseline_checklist_paths=(
-            Path("experiments/baseline-1/checklist.csv"),
-            Path("experiments/baseline-2/checklist.csv"),
-        ),
-        human_checklist_path=Path("experiments/collection/manual-review/checklist.csv"),
+        collection_dir=Path("experiments/collection"),
         output_dir=Path("experiments/collection/license-review"),
     )
     assert json.loads(capsys.readouterr().out) == {
         "blank_license_repositories": 3,
-        "legacy_baseline_checklists": 2,
         "license_names": 10,
         "other_license_repositories": 12,
         "output_dir": "experiments/collection/license-review",
         "repositories": 120,
+        "status": "prepared",
+        "next_action": "create an allowlist and resume collection with --license-allowlist-csv",
     }
 
 
@@ -273,6 +266,9 @@ def test_apply_guideline_license_allowlist_prints_selection_counts(
         "input_repositories": 120,
         "output_dir": "experiments/collection/license-review/applied",
         "rejected_repositories": 15,
+        "preview_only": True,
+        "status": "preview_complete",
+        "next_action": "resume collection with --license-allowlist-csv",
     }
 
 
@@ -363,6 +359,7 @@ def test_finalize_guideline_collection_prints_validated_counts(
         "new_repositories": 86,
         "output_dir": "experiments/collection/final",
         "repositories": 120,
+        "status": "complete",
     }
 
 
@@ -488,21 +485,209 @@ def test_collect_guideline_repositories_accepts_a_human_license_allowlist() -> N
     )
 
 
-def test_collect_guideline_repositories_requires_a_human_license_allowlist() -> None:
-    with pytest.raises(SystemExit):
-        main._parser().parse_args(
-            [
-                "collect-guideline-repositories",
-                "--repository-source",
-                "github",
-                "--output-dir",
-                "output/guideline-collection",
-                "--baseline-checklist",
-                "experiments/50/checklist_full.csv",
-                "--exclude-csv",
-                "experiments/50/input/candidates.csv",
-            ],
+def test_collect_guideline_repositories_can_start_before_license_review() -> None:
+    arguments = main._parser().parse_args(
+        [
+            "collect-guideline-repositories",
+            "--repository-source",
+            "github",
+            "--output-dir",
+            "output/guideline-collection",
+            "--baseline-checklist",
+            "experiments/50/checklist_full.csv",
+            "--exclude-csv",
+            "experiments/50/input/candidates.csv",
+        ],
+    )
+
+    assert arguments.license_allowlist_csv is None
+
+
+def test_collection_starts_with_provisional_repositories_before_license_review(
+    mocker: MockerFixture,
+) -> None:
+    candidates = (
+        mocker.Mock(repository="baseline/project", license_name="GNU GPL v3.0"),
+        mocker.Mock(repository="new/project", license_name="MIT License"),
+    )
+    mocker.patch(
+        "main.guideline_collection.load_baseline_repositories",
+        autospec=True,
+        return_value={"baseline/project"},
+    )
+    mocker.patch(
+        "main.guideline_collection.load_manual_review_state",
+        autospec=True,
+        return_value=main.guideline_collection.ManualReviewState(set(), set()),
+    )
+
+    policy = main.guideline_license.load_collection_license_policy(candidates, allowlist_path=None)
+    review = main._collection_review_state(
+        candidates=candidates,
+        baseline_checklists=(Path("baseline.csv"),),
+        human_checklist=None,
+        eligible_repositories=set(policy.eligible_repositories),
+    )
+
+    assert not policy.is_reviewed
+    assert review.baseline_repositories == frozenset({"baseline/project"})
+    assert review.eligible_repositories == frozenset({"baseline/project", "new/project"})
+    assert not review.manual_review.confirmed_repositories
+
+
+def test_collection_rejects_file_review_before_license_review() -> None:
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="license review must finish before file review"):
+        main._validate_collection_review_arguments(
+            policy,
+            human_checklist=Path("checklist.csv"),
+            review_output_checklist=None,
+            prior_collection_dir=None,
+            output_dir=Path("collection"),
         )
+
+
+def test_provisional_collection_records_pending_license_policy() -> None:
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset({"new/project"}),
+    )
+
+    configuration = main._collection_license_configuration(
+        policy,
+        allowlist_path=None,
+        ineligible_reviewed_repositories=frozenset(),
+    )
+
+    assert configuration == {
+        "license_policy_status": "pending",
+        "license_allowlist": [],
+        "license_allowlist_fingerprints": {},
+        "license_ineligible_reviewed_repositories": [],
+    }
+
+
+def test_provisional_collection_rejects_a_file_review_output() -> None:
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="license review must finish before file review"):
+        main._validate_collection_review_arguments(
+            policy,
+            human_checklist=None,
+            review_output_checklist=Path("checklist.csv"),
+            prior_collection_dir=None,
+            output_dir=Path("collection"),
+        )
+
+
+def test_provisional_collection_rejects_existing_file_review_artifacts(tmp_path: Path) -> None:
+    output_dir = tmp_path / "collection"
+    _write_pending_collection(output_dir)
+    (output_dir / "manual-review").mkdir()
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="provisional collection contains file-review artifacts"):
+        main._validate_collection_review_arguments(
+            policy,
+            human_checklist=None,
+            review_output_checklist=None,
+            prior_collection_dir=None,
+            output_dir=output_dir,
+        )
+
+
+def test_provisional_collection_accepts_a_completed_review_from_a_prior_collection() -> None:
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset(),
+    )
+
+    main._validate_collection_review_arguments(
+        policy,
+        human_checklist=Path("checklist_done.csv"),
+        review_output_checklist=None,
+        prior_collection_dir=Path("prior-collection"),
+        output_dir=Path("new-collection"),
+    )
+
+
+def test_license_policy_transition_rejects_a_new_file_review(tmp_path: Path) -> None:
+    output_dir = tmp_path / "collection"
+    _write_pending_collection(output_dir)
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=True,
+        allowlist=main.guideline_license.LicenseAllowlist(frozenset({"MIT License"})),
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="file review cannot be applied during license policy transition"):
+        main._validate_collection_review_arguments(
+            policy,
+            human_checklist=Path("checklist_done.csv"),
+            review_output_checklist=None,
+            prior_collection_dir=None,
+            output_dir=output_dir,
+        )
+
+
+def test_license_policy_cannot_be_applied_before_provisional_target_is_reached(tmp_path: Path) -> None:
+    (tmp_path / "collection_configuration.json").write_text(
+        '{"license_policy_status":"pending"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "collection_summary.json").write_text(
+        '{"target_reached":false}\n',
+        encoding="utf-8",
+    )
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=True,
+        allowlist=main.guideline_license.LicenseAllowlist(frozenset({"MIT License"})),
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="provisional repository target is not reached"):
+        main._validate_license_policy_transition(tmp_path, policy)
+
+
+def test_new_collection_must_start_before_license_policy_is_applied(tmp_path: Path) -> None:
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=True,
+        allowlist=main.guideline_license.LicenseAllowlist(frozenset({"MIT License"})),
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="start the provisional collection without an allowlist"):
+        main._validate_license_policy_transition(tmp_path, policy)
+
+
+def test_applied_license_policy_cannot_return_to_pending(tmp_path: Path) -> None:
+    (tmp_path / "collection_configuration.json").write_text(
+        '{"license_policy_status":"applied"}\n',
+        encoding="utf-8",
+    )
+    policy = main.guideline_license.CollectionLicensePolicy(
+        is_reviewed=False,
+        allowlist=None,
+        eligible_repositories=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="applied license policy requires its allowlist"):
+        main._validate_license_policy_transition(tmp_path, policy)
 
 
 def test_collect_guideline_repositories_accepts_github_without_a_cache_root() -> None:
@@ -624,6 +809,7 @@ def test_collect_guideline_repositories_runs_the_cache_only_file_pipeline(
             str(tmp_path / "prior-collection"),
         ],
     )
+    _write_pending_collection(arguments.output_dir)
     baseline_candidate = mocker.Mock(
         repository="baseline/project",
         revision="b" * 40,
@@ -817,7 +1003,7 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
     scenario.store.initialize.assert_called_once_with()
     configuration = scenario.store_factory.call_args.kwargs["configuration"]
     assert "max_screened_repositories" not in configuration
-    assert configuration["schema_version"] == 4
+    assert configuration["schema_version"] == 5
     assert configuration["sampling_method"] == "stratified_random_per_language_until_quota"
     assert configuration["license_allowlist"] == ["MIT License"]
     assert configuration["license_ineligible_reviewed_repositories"] == [
@@ -881,6 +1067,7 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
     assert scenario.write_reports.call_args.kwargs["schedule"] == (scenario.scheduled, scenario.later_scheduled)
     assert scenario.write_reports.call_args.kwargs["prior_screenings"] == eligible_prior_screenings
     assert scenario.write_reports.call_args.kwargs["license_ineligible_reviewed_repositories"] == 2
+    assert scenario.write_reports.call_args.kwargs["export_manual_review"] is False
     assert scenario.write_reports.call_args.kwargs["review_checklist_path"] == scenario.tmp_path / "checklist_done.csv"
     assert (
         scenario.write_reports.call_args.kwargs["review_output_checklist_path"]
@@ -889,6 +1076,10 @@ def _assert_cache_collection_scenario(scenario: _CacheCollectionScenario) -> Non
     scenario.client.close.assert_called_once_with()
     assert scenario.output["license_ineligible_reviewed_repositories"] == 2
     assert scenario.output["carried_screened_repositories"] == 1
+    assert scenario.output["license_policy_status"] == "applied"
+    assert scenario.output["workflow_stage"] == "needs_replenishment"
+    assert scenario.output["next_action"] == "resume eligible repository screening"
+    assert scenario.output["manual_review_ready"] is False
     assert scenario.output["target_repositories_by_language"] == dict.fromkeys(scenario.baseline_counts, 30)
     assert scenario.output["selected_repositories_by_language"] == scenario.baseline_counts
     assert scenario.output["remaining_repositories_by_language"] == {
@@ -923,6 +1114,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
             "200",
         ],
     )
+    _write_pending_collection(arguments.output_dir)
     baseline_candidate = mocker.Mock(
         repository="baseline/project",
         revision="b" * 40,
@@ -998,7 +1190,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
             pending_new_repositories=0,
             selected_new_repositories=0,
             processed_repositories=1,
-            target_reached=False,
+            target_reached=True,
             human_target_reached=False,
         ),
     )
@@ -1017,6 +1209,7 @@ def test_collect_guideline_repositories_runs_the_github_file_pipeline(
     assert collect.call_args.kwargs["max_screened_repositories"] == 200
     write_reports.assert_called_once()
     assert write_reports.call_args.kwargs["source_metrics"] is persistent.return_value.report_metrics
+    assert write_reports.call_args.kwargs["export_manual_review"] is True
     responses.close.assert_called_once_with()
     github.return_value.close.assert_called_once_with()
     store.initialize.assert_called_once_with()

@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import guideline_collection
+import guideline_workflow
 import markdown_cache_classification
 import markdown_cache_results
 import markdown_review
@@ -48,6 +49,8 @@ def write_collection_reports(
     screening_limit_reached: bool = False,
     license_ineligible_reviewed_repositories: int = 0,
     source_metrics: Callable[[], Mapping[str, object]] | None = None,
+    license_policy_applied: bool = True,
+    export_manual_review: bool = True,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
     new_targets = guideline_collection.new_repository_targets_by_language(
@@ -70,7 +73,11 @@ def write_collection_reports(
         new_targets,
         confirmed_counts=confirmed_counts,
     )
-    pending = store.selected_by_language(remaining_targets, excluded_repositories=confirmed | rejected)
+    pending = store.selected_by_language(
+        remaining_targets,
+        excluded_repositories=confirmed | rejected,
+        included_orders={item.sample_order for item in schedule},
+    )
     pending_counter = Counter(result.scheduled.language for result in pending)
     pending_counts = {language: pending_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
     selected = tuple(
@@ -98,13 +105,14 @@ def write_collection_reports(
         confirmed_repositories=confirmed,
     )
     selected_file_rows = tuple(row for row in file_rows if str(row["name"]).casefold() in selected_names)
-    markdown_review.export_cached_review_files(
-        classified_rows=selected_file_rows,
-        repository_client=repository_client,
-        output_dir=output_dir / "manual-review",
-        existing_checklist_path=review_checklist_path,
-        checklist_path=review_output_checklist_path,
-    )
+    if export_manual_review:
+        markdown_review.export_cached_review_files(
+            classified_rows=selected_file_rows,
+            repository_client=repository_client,
+            output_dir=output_dir / "manual-review",
+            existing_checklist_path=review_checklist_path,
+            checklist_path=review_output_checklist_path,
+        )
     _write_summary(
         output_dir=output_dir,
         baseline_counts=baseline_repository_counts,
@@ -128,6 +136,8 @@ def write_collection_reports(
         max_screened_repositories=max_screened_repositories,
         screening_limit_reached=screening_limit_reached,
         license_ineligible_reviewed_repositories=license_ineligible_reviewed_repositories,
+        license_policy_applied=license_policy_applied,
+        manual_review_exported=export_manual_review,
         source_metrics=source_metrics() if source_metrics is not None else {},
     )
 
@@ -266,6 +276,8 @@ def _write_summary(
     max_screened_repositories: int | None,
     screening_limit_reached: bool,
     license_ineligible_reviewed_repositories: int,
+    license_policy_applied: bool,
+    manual_review_exported: bool,
     source_metrics: Mapping[str, object],
 ) -> None:
     target_counts = guideline_collection.target_repository_counts_by_language(target_total)
@@ -279,6 +291,17 @@ def _write_summary(
     }
     baseline_count = sum(baseline_counts.values())
     new_target = target_total - baseline_count
+    target_reached = all(not count for count in remaining_counts.values())
+    human_target_reached = all(
+        baseline_counts[language] + confirmed_counts.get(language, 0) >= target_counts[language]
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    )
+    workflow = guideline_workflow.collection_workflow_status(
+        license_policy_applied=license_policy_applied,
+        target_reached=target_reached,
+        human_target_reached=human_target_reached,
+    )
+    llm_positive_files = sum(row["status"] in {"pass", "review"} for row in selected_file_rows)
     _write_json(
         output_dir / _SUMMARY_FILENAME,
         {
@@ -301,13 +324,17 @@ def _write_summary(
             "pending_new_repositories_by_language": dict(pending_counts),
             "selected_repositories_by_language": selected_counts,
             "remaining_repositories_by_language": remaining_counts,
-            "target_reached": all(not count for count in remaining_counts.values()),
-            "human_target_reached": all(
-                baseline_counts[language] + confirmed_counts.get(language, 0) >= target_counts[language]
-                for language in repository_sampling.DEFAULT_LANGUAGES
-            ),
+            "target_reached": target_reached,
+            "human_target_reached": human_target_reached,
+            "license_policy_status": "applied" if license_policy_applied else "pending",
+            "workflow_stage": workflow.stage.value,
+            "next_action": workflow.next_action,
+            "ready_for_license_review": workflow.ready_for_license_review,
+            "manual_review_ready": workflow.manual_review_ready,
+            "ready_to_finalize": workflow.ready_to_finalize,
             "classified_files": len(file_rows),
-            "manual_review_files": sum(row["status"] in {"pass", "review"} for row in selected_file_rows),
+            "llm_positive_files": llm_positive_files,
+            "manual_review_files": llm_positive_files if manual_review_exported else 0,
             "unresolved_files": unresolved_count,
             **source_metrics,
         },

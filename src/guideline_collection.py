@@ -21,6 +21,16 @@ import repository_sampling
 
 _ATTEMPTS_FILENAME = "repository_attempts.jsonl"
 _CONFIGURATION_FILENAME = "collection_configuration.json"
+_LICENSE_POLICY_CONFIGURATION_FIELDS = frozenset(
+    {
+        "baseline_repositories",
+        "baseline_repositories_by_language",
+        "license_allowlist",
+        "license_allowlist_fingerprints",
+        "license_ineligible_reviewed_repositories",
+        "license_policy_status",
+    },
+)
 _SAMPLING_MANIFEST_FIELDS = (
     "sample_order",
     "round_number",
@@ -278,6 +288,7 @@ class RepositoryCollectionStore:
         limits: Mapping[str, int],
         *,
         excluded_repositories: set[str] | None = None,
+        included_orders: set[int] | None = None,
     ) -> tuple[RepositoryScreening, ...]:
         """Return the first positive repositories up to each language limit."""
         if any(limit < 0 for limit in limits.values()):
@@ -287,6 +298,8 @@ class RepositoryCollectionStore:
         selected = []
         for result in self.results():
             language = result.scheduled.language
+            if included_orders is not None and result.scheduled.sample_order not in included_orders:
+                continue
             if result.status != "pass" or result.scheduled.candidate.repository.casefold() in excluded:
                 continue
             if counts[language] >= limits.get(language, 0):
@@ -299,10 +312,18 @@ class RepositoryCollectionStore:
         """Return sampling positions with at least one persisted outcome."""
         return set(self._results)
 
-    def retryable(self, *, max_attempts: int) -> tuple[RepositoryScreening, ...]:
+    def retryable(
+        self,
+        *,
+        max_attempts: int,
+        included_orders: set[int] | None = None,
+    ) -> tuple[RepositoryScreening, ...]:
         """Return repository or file outcomes that remain within their retry budget."""
         return tuple(
-            result for result in self.results() if self._is_retryable(result, max_repository_attempts=max_attempts)
+            result
+            for result in self.results()
+            if included_orders is None or result.scheduled.sample_order in included_orders
+            if self._is_retryable(result, max_repository_attempts=max_attempts)
         )
 
     def _is_retryable(
@@ -339,8 +360,12 @@ class RepositoryCollectionStore:
             _write_json(path, self._configuration)
             return
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != self._configuration:
-            raise ValueError(f"Existing repository collection configuration does not match this run: {path}")
+        if existing == self._configuration:
+            return
+        if _is_license_policy_transition(existing, self._configuration):
+            _write_json(path, self._configuration)
+            return
+        raise ValueError(f"Existing repository collection configuration does not match this run: {path}")
 
     def _load_results(self) -> dict[int, RepositoryScreening]:
         path = self._output_dir / _ATTEMPTS_FILENAME
@@ -651,6 +676,7 @@ def collect_repositories(
     """Process each fixed language order until every language reaches its quota."""
     confirmed = _normalized_repository_names(confirmed_repositories or set())
     rejected = _normalized_repository_names(rejected_repositories or set())
+    included_orders = {item.sample_order for item in schedule}
     target_counts = target_repository_counts_by_language(target_total_repositories)
     new_targets = new_repository_targets_by_language(
         baseline_repository_counts,
@@ -677,7 +703,11 @@ def collect_repositories(
         rounds[item.round_number].append(item)
     screening_limit_reached = False
     for round_number in sorted(rounds):
-        pending = store.selected_by_language(remaining_targets, excluded_repositories=reviewed)
+        pending = store.selected_by_language(
+            remaining_targets,
+            excluded_repositories=reviewed,
+            included_orders=included_orders,
+        )
         pending_counts = Counter(result.scheduled.language for result in pending)
         active_languages = {
             language for language, limit in remaining_targets.items() if pending_counts[language] < limit
@@ -698,7 +728,10 @@ def collect_repositories(
             break
         _process_repositories(next_wave, processor=processor, store=store, workers=workers)
     while True:
-        retryable = store.retryable(max_attempts=max_repository_attempts)
+        retryable = store.retryable(
+            max_attempts=max_repository_attempts,
+            included_orders=included_orders,
+        )
         if not retryable:
             break
         _process_repositories(
@@ -707,7 +740,11 @@ def collect_repositories(
             store=store,
             workers=workers,
         )
-    pending = store.selected_by_language(remaining_targets, excluded_repositories=reviewed)
+    pending = store.selected_by_language(
+        remaining_targets,
+        excluded_repositories=reviewed,
+        included_orders=included_orders,
+    )
     pending_counts = Counter(result.scheduled.language for result in pending)
     target_reached = all(
         pending_counts[language] >= remaining_targets[language] for language in repository_sampling.DEFAULT_LANGUAGES
@@ -958,6 +995,24 @@ def _screening(record: dict[str, object]) -> RepositoryScreening:
         input_too_large_count=int(str(record["input_too_large_count"])),
         retryable=bool(record["retryable"]),
         error=str(record["error"]),
+    )
+
+
+def _is_license_policy_transition(existing: object, current: Mapping[str, object]) -> bool:
+    if not isinstance(existing, dict):
+        return False
+    existing_configuration = cast(Mapping[str, object], existing)
+    if existing_configuration.get("schema_version") != 5 or current.get("schema_version") != 5:
+        return False
+    if (
+        existing_configuration.get("license_policy_status") != "pending"
+        or current.get("license_policy_status") != "applied"
+    ):
+        return False
+    fields = set(existing_configuration) | set(current)
+    return all(
+        field in _LICENSE_POLICY_CONFIGURATION_FIELDS or existing_configuration.get(field) == current.get(field)
+        for field in fields
     )
 
 

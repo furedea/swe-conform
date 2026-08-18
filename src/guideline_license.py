@@ -2,11 +2,11 @@
 
 import csv
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-import guideline_review
 import repository
 
 _REPOSITORY_LICENSES_FILENAME = "repository_licenses.csv"
@@ -14,6 +14,14 @@ _ACCEPTED_REPOSITORIES_FILENAME = "accepted_repositories.csv"
 _REJECTED_REPOSITORIES_FILENAME = "rejected_repositories.csv"
 _REPOSITORY_LICENSE_FIELDS = ("repository", "license_name")
 _ALLOWLIST_FIELDS = ("license_name",)
+_SELECTED_REPOSITORY_FIELDS = (
+    "repository",
+    "revision",
+    "sampling_language",
+    "license_name",
+    "origin",
+    "sample_order",
+)
 _AMBIGUOUS_LICENSE_NAME = "other"
 
 
@@ -25,7 +33,6 @@ class LicenseReviewReport:
     license_names: int
     blank_license_repositories: int
     other_license_repositories: int
-    legacy_baseline_checklists: int
     output_dir: Path
 
 
@@ -54,38 +61,71 @@ class LicenseAllowlist:
         )
 
 
-def prepare_license_review(
+@dataclass(frozen=True, slots=True)
+class CollectionLicensePolicy:
+    """License eligibility state for one staged repository collection."""
+
+    is_reviewed: bool
+    allowlist: LicenseAllowlist | None
+    eligible_repositories: frozenset[str]
+
+
+def load_collection_license_policy(
+    candidates: Sequence[repository.RepositoryCandidate],
     *,
-    input_dir: Path,
-    baseline_checklist_paths: Sequence[Path],
-    human_checklist_path: Path,
+    allowlist_path: Path | None,
+) -> CollectionLicensePolicy:
+    """Resolve provisional or reviewed repository license eligibility."""
+    if allowlist_path is None:
+        return CollectionLicensePolicy(
+            is_reviewed=False,
+            allowlist=None,
+            eligible_repositories=frozenset(candidate.repository.casefold() for candidate in candidates),
+        )
+    allowlist = load_license_allowlist(allowlist_path)
+    return CollectionLicensePolicy(
+        is_reviewed=True,
+        allowlist=allowlist,
+        eligible_repositories=frozenset(
+            candidate.repository.casefold() for candidate in candidates if allowlist.allows(candidate.license_name)
+        ),
+    )
+
+
+def prepare_collection_license_review(
+    *,
+    collection_dir: Path,
     output_dir: Path,
 ) -> LicenseReviewReport:
-    """Write license names for repositories accepted by completed reviews."""
-    accepted_repositories, legacy_baseline_checklists = _accepted_repositories(
-        baseline_checklist_paths=baseline_checklist_paths,
-        human_checklist_path=human_checklist_path,
+    """Write license names for one collection's provisional selection."""
+    configuration = json.loads(
+        (collection_dir / "collection_configuration.json").read_text(encoding="utf-8"),
     )
-    candidates = repository.load_repository_candidates(input_dir)
-    candidates_by_name = _candidates_by_name(candidates)
-    missing = sorted(accepted_repositories.difference(candidates_by_name))
-    if missing:
-        raise ValueError(f"license metadata is missing for accepted repository: {missing[0]}")
+    if not isinstance(configuration, dict) or configuration.get("license_policy_status") != "pending":
+        raise ValueError("collection license review is already complete")
+    summary = json.loads((collection_dir / "collection_summary.json").read_text(encoding="utf-8"))
+    if not isinstance(summary, dict) or summary.get("target_reached") is not True:
+        raise ValueError("provisional repository target is not reached")
+    selected = _read_csv(
+        collection_dir / "selected_repositories.csv",
+        expected_fields=_SELECTED_REPOSITORY_FIELDS,
+    )
+    _validate_unique_selected_repositories(selected)
+    _validate_provisional_selection(configuration, summary, selected)
     rows = tuple(
         {
-            "repository": candidates_by_name[name].repository,
-            "license_name": candidates_by_name[name].license_name,
+            "repository": row["repository"],
+            "license_name": row["license_name"],
         }
-        for name in sorted(accepted_repositories)
+        for row in selected
     )
     report = LicenseReviewReport(
         repositories=len(rows),
         license_names=len({row["license_name"] for row in rows}),
-        blank_license_repositories=sum(not str(row["license_name"]).strip() for row in rows),
+        blank_license_repositories=sum(not row["license_name"].strip() for row in rows),
         other_license_repositories=sum(
-            str(row["license_name"]).strip().casefold() == _AMBIGUOUS_LICENSE_NAME for row in rows
+            row["license_name"].strip().casefold() == _AMBIGUOUS_LICENSE_NAME for row in rows
         ),
-        legacy_baseline_checklists=legacy_baseline_checklists,
         output_dir=output_dir,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,7 +134,6 @@ def prepare_license_review(
         output_dir / "summary.json",
         {
             "blank_license_repositories": report.blank_license_repositories,
-            "legacy_baseline_checklists": report.legacy_baseline_checklists,
             "license_names": report.license_names,
             "other_license_repositories": report.other_license_repositories,
             "repositories": report.repositories,
@@ -148,48 +187,38 @@ def load_license_allowlist(path: Path) -> LicenseAllowlist:
     return LicenseAllowlist(names)
 
 
-def _accepted_repositories(
-    *,
-    baseline_checklist_paths: Sequence[Path],
-    human_checklist_path: Path,
-) -> tuple[set[str], int]:
-    repositories: set[str] = set()
-    legacy_baseline_checklists = 0
-    for checklist_path in baseline_checklist_paths:
-        fieldnames, rows = guideline_review.load_completed_guideline_rows(
-            checklist_path,
-            require_duplicate_column=False,
-        )
-        legacy_baseline_checklists += "duplicate_of" not in fieldnames
-        repositories.update(_accepted_repository_names(rows))
-    _, human_rows = guideline_review.load_completed_guideline_rows(human_checklist_path)
-    repositories.update(_accepted_repository_names(human_rows))
-    return repositories, legacy_baseline_checklists
+def _validate_unique_selected_repositories(rows: Sequence[Mapping[str, str]]) -> None:
+    seen: set[str] = set()
+    for row in rows:
+        repository_name = row["repository"].strip().casefold()
+        if repository_name in seen:
+            raise ValueError(f"duplicate selected repository: {repository_name}")
+        seen.add(repository_name)
 
 
-def _candidates_by_name(
-    candidates: Sequence[repository.RepositoryCandidate],
-) -> dict[str, repository.RepositoryCandidate]:
-    indexed: dict[str, repository.RepositoryCandidate] = {}
-    for candidate in candidates:
-        normalized = candidate.repository.casefold()
-        existing = indexed.get(normalized)
-        if existing is not None and (
-            existing.revision != candidate.revision or existing.license_name != candidate.license_name
-        ):
-            raise ValueError(f"license metadata is ambiguous for repository: {candidate.repository}")
-        indexed[normalized] = candidate
-    return indexed
-
-
-def _accepted_repository_names(rows: Sequence[Mapping[str, str]]) -> set[str]:
-    return {
-        row["repository"].strip().casefold()
-        for row in rows
-        if row["human_decision"].strip() == "pass"
-        if not row["duplicate_of"].strip()
-        if row["repository"].strip()
-    }
+def _validate_provisional_selection(
+    configuration: Mapping[str, object],
+    summary: Mapping[str, object],
+    rows: Sequence[Mapping[str, str]],
+) -> None:
+    target_total = configuration.get("target_total_repositories")
+    raw_target_counts = configuration.get("target_repositories_by_language")
+    if not isinstance(target_total, int) or not isinstance(raw_target_counts, dict):
+        raise ValueError("provisional selection does not match recorded quotas")
+    target_counts: dict[str, int] = {}
+    for language, count in raw_target_counts.items():
+        if not isinstance(language, str) or not isinstance(count, int):
+            raise ValueError("provisional selection does not match recorded quotas")
+        target_counts[language] = count
+    selected_counts = Counter(row["sampling_language"] for row in rows)
+    if (
+        len(rows) != target_total
+        or summary.get("selected_total_repositories") != target_total
+        or sum(target_counts.values()) != target_total
+        or any(selected_counts[language] != count for language, count in target_counts.items())
+        or any(language not in target_counts for language in selected_counts)
+    ):
+        raise ValueError("provisional selection does not match recorded quotas")
 
 
 def _read_csv(path: Path, *, expected_fields: Sequence[str]) -> tuple[dict[str, str], ...]:

@@ -20,7 +20,8 @@ _REPOSITORIES_FILENAME = "repositories.csv"
 _GUIDELINE_FILES_FILENAME = "guideline_files.csv"
 _SUMMARY_FILENAME = "summary.json"
 _PROVENANCE_FILENAME = "provenance.json"
-_COLLECTION_SCHEMA_VERSION = 4
+_COLLECTION_SCHEMA_VERSION = 5
+_LEGACY_COLLECTION_SCHEMA_VERSION = 4
 _FINAL_FILENAMES = frozenset(
     {
         _REPOSITORIES_FILENAME,
@@ -77,6 +78,7 @@ _COLLECTION_CONFIGURATION_FIELDS = (
     "license_allowlist",
     "license_allowlist_fingerprints",
     "license_ineligible_reviewed_repositories",
+    "license_policy_status",
     "prior_collection_fingerprints",
     "sample_seed",
     "sampling_method",
@@ -192,7 +194,12 @@ def _validate_output_dir(output_dir: Path) -> None:
 
 
 def _validate_collection_configuration_schema(configuration: Mapping[str, object]) -> None:
-    if configuration.get("schema_version") != _COLLECTION_SCHEMA_VERSION:
+    schema_version = configuration.get("schema_version")
+    if schema_version == _COLLECTION_SCHEMA_VERSION:
+        if configuration.get("license_policy_status") != "applied":
+            raise ValueError("collection license policy must be applied before finalization")
+        return
+    if schema_version != _LEGACY_COLLECTION_SCHEMA_VERSION:
         raise ValueError("unsupported collection configuration schema")
 
 

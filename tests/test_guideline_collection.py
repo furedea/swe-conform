@@ -323,6 +323,64 @@ def test_collection_store_keeps_attempts_and_selects_each_positive_repository_on
     assert len((tmp_path / "repository_attempts.jsonl").read_text(encoding="utf-8").splitlines()) == 3
 
 
+def test_collection_store_allows_one_license_policy_transition(tmp_path: Path) -> None:
+    pending = _collection_configuration("pending")
+    guideline_collection.RepositoryCollectionStore(tmp_path, configuration=pending).initialize()
+    applied = {
+        **pending,
+        "license_policy_status": "applied",
+        "license_allowlist": ["MIT License"],
+        "license_allowlist_fingerprints": {"license_allowlist.csv": "hash"},
+        "license_ineligible_reviewed_repositories": ["example/gpl"],
+        "baseline_repositories": ["example/mit"],
+        "baseline_repositories_by_language": {"Java": 1},
+    }
+
+    guideline_collection.RepositoryCollectionStore(tmp_path, configuration=applied).initialize()
+
+    assert json.loads((tmp_path / "collection_configuration.json").read_text(encoding="utf-8")) == applied
+
+
+def test_license_policy_transition_rejects_an_unrelated_configuration_change(tmp_path: Path) -> None:
+    pending = _collection_configuration("pending")
+    guideline_collection.RepositoryCollectionStore(tmp_path, configuration=pending).initialize()
+    applied = {
+        **pending,
+        "license_policy_status": "applied",
+        "license_allowlist": ["MIT License"],
+        "model": "different-model",
+    }
+
+    with pytest.raises(ValueError, match="configuration does not match"):
+        guideline_collection.RepositoryCollectionStore(tmp_path, configuration=applied).initialize()
+
+
+def test_applied_license_policy_cannot_return_to_pending(tmp_path: Path) -> None:
+    applied = {
+        **_collection_configuration("applied"),
+        "license_allowlist": ["MIT License"],
+    }
+    guideline_collection.RepositoryCollectionStore(tmp_path, configuration=applied).initialize()
+
+    with pytest.raises(ValueError, match="configuration does not match"):
+        guideline_collection.RepositoryCollectionStore(
+            tmp_path,
+            configuration=_collection_configuration("pending"),
+        ).initialize()
+
+
+def test_applied_license_allowlist_cannot_be_replaced(tmp_path: Path) -> None:
+    applied = {
+        **_collection_configuration("applied"),
+        "license_allowlist": ["MIT License"],
+    }
+    guideline_collection.RepositoryCollectionStore(tmp_path, configuration=applied).initialize()
+    changed = {**applied, "license_allowlist": ["Apache License 2.0"]}
+
+    with pytest.raises(ValueError, match="configuration does not match"):
+        guideline_collection.RepositoryCollectionStore(tmp_path, configuration=changed).initialize()
+
+
 def test_prior_collection_loads_each_latest_screening_outcome(tmp_path: Path) -> None:
     prior_dir = tmp_path / "prior"
     store = guideline_collection.RepositoryCollectionStore(prior_dir, configuration={"sample_seed": 41})
@@ -770,6 +828,36 @@ def test_collection_retry_replaces_a_later_pending_repository_in_the_same_langua
             },
         )
     ] == [1]
+
+
+def test_collection_replaces_a_persisted_positive_excluded_by_license_policy(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    ineligible = _scheduled_repository("Java", 1)
+    eligible = _scheduled_repository("Java", 5)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(ineligible, status="pass"))
+    processor = mocker.Mock()
+    processor.process.return_value = guideline_collection.RepositoryScreening(eligible, status="pass")
+
+    report = guideline_collection.collect_repositories(
+        (eligible,),
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
+        store=store,
+        processor=processor,
+        workers=1,
+    )
+
+    processor.process.assert_called_once_with(eligible)
+    assert report.pending_new_repositories_by_language["Java"] == 1
 
 
 def test_repository_screening_uses_the_checkpoint_to_detect_retryable_file_errors(tmp_path: Path) -> None:
@@ -1340,6 +1428,84 @@ def test_collection_reports_use_the_completed_checklist_as_the_next_round_source
     )
 
 
+def test_provisional_collection_does_not_export_files_for_manual_review(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    export = mocker.patch(
+        "guideline_collection_reports.markdown_review.export_cached_review_files",
+        autospec=True,
+    )
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(),
+        schedule=(),
+        store=store,
+        baseline_repositories={
+            "baseline/java",
+            "baseline/javascript",
+            "baseline/python",
+            "baseline/typescript",
+        },
+        baseline_repository_counts=dict.fromkeys(repository_sampling.DEFAULT_LANGUAGES, 1),
+        target_total_repositories=4,
+        repository_client=mocker.Mock(),
+        license_policy_applied=False,
+        export_manual_review=False,
+    )
+
+    export.assert_not_called()
+    assert not (tmp_path / "manual-review").exists()
+    summary = json.loads((tmp_path / "collection_summary.json").read_text(encoding="utf-8"))
+    assert summary["license_policy_status"] == "pending"
+    assert summary["workflow_stage"] == "needs_license_review"
+    assert summary["next_action"] == "prepare and apply the license allowlist"
+    assert summary["ready_for_license_review"] is True
+    assert summary["manual_review_ready"] is False
+    assert summary["manual_review_files"] == 0
+
+
+def test_collection_reports_exclude_positive_repositories_outside_the_active_policy(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    ineligible = _scheduled_repository("Java", 1)
+    eligible = _scheduled_repository("Java", 5)
+    store = guideline_collection.RepositoryCollectionStore(tmp_path, configuration={"sample_seed": 41})
+    store.initialize()
+    store.append(guideline_collection.RepositoryScreening(ineligible, status="pass"))
+    store.append(guideline_collection.RepositoryScreening(eligible, status="pass"))
+
+    guideline_collection_reports.write_collection_reports(
+        output_dir=tmp_path,
+        population=(ineligible.candidate, eligible.candidate),
+        schedule=(eligible,),
+        store=store,
+        baseline_repositories={
+            "baseline/javascript",
+            "baseline/python",
+            "baseline/typescript",
+        },
+        baseline_repository_counts={
+            "Java": 0,
+            "JavaScript": 1,
+            "Python": 1,
+            "TypeScript": 1,
+        },
+        target_total_repositories=4,
+        repository_client=mocker.Mock(),
+        export_manual_review=False,
+    )
+
+    selected = _read_rows(tmp_path / "selected_repositories.csv")
+    assert [row["repository"] for row in selected if row["origin"] == "new_pending"] == [
+        eligible.candidate.repository,
+    ]
+
+
 def test_cached_repository_processor_persists_each_file_decision(
     mocker: MockerFixture,
     tmp_path: Path,
@@ -1448,6 +1614,11 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def _read_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8", newline="") as input_file:
+        return list(csv.DictReader(input_file))
+
+
 def _file_row(
     scheduled: repository_sampling.ScheduledRepository,
     path: str,
@@ -1496,6 +1667,20 @@ def _response_document(value: Mapping[str, object]) -> dict[str, object]:
             "total_tokens": 120,
             "input_tokens_details": {},
         },
+    }
+
+
+def _collection_configuration(license_policy_status: str) -> dict[str, object]:
+    return {
+        "schema_version": 5,
+        "sample_seed": 41,
+        "model": "gpt-5.6-luna",
+        "license_policy_status": license_policy_status,
+        "license_allowlist": [],
+        "license_allowlist_fingerprints": {},
+        "license_ineligible_reviewed_repositories": [],
+        "baseline_repositories": ["example/gpl", "example/mit"],
+        "baseline_repositories_by_language": {"Java": 2},
     }
 
 

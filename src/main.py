@@ -23,6 +23,7 @@ import guideline_collection_reports
 import guideline_finalization
 import guideline_license
 import guideline_review
+import guideline_workflow
 import markdown_audit
 import markdown_batch
 import markdown_cache_classification
@@ -61,6 +62,16 @@ class _PriorCollectionInputs:
     collection: guideline_collection.PriorCollection | None
     eligible_screenings: tuple[guideline_collection.RepositoryScreening, ...]
     fingerprints: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectionRepositorySource:
+    tree_client: markdown_filename_audit.MarkdownTreeClient
+    blob_client: markdown_cache_classification.BlobClient
+    snapshot_inspector: markdown_candidate_extraction.SnapshotInspector | None
+    skip_incomplete_repositories: bool
+    github: github_client.GitHubClient | None = None
+    github_source: github_repository.PersistentGitHubRepositoryClient | None = None
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -212,11 +223,9 @@ def _add_guideline_license_arguments(
 ) -> None:
     prepare = subparsers.add_parser(
         "prepare-guideline-license-review",
-        help="List license names for human-accepted guideline repositories",
+        help="List license names for provisionally selected repositories",
     )
-    prepare.add_argument("--input-dir", type=Path, default=_DEFAULT_INPUT_DIR)
-    prepare.add_argument("--baseline-checklist", type=Path, action="append", required=True)
-    prepare.add_argument("--human-checklist", type=Path, required=True)
+    prepare.add_argument("--collection-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
     apply = subparsers.add_parser(
         "apply-guideline-license-allowlist",
@@ -255,7 +264,7 @@ def _add_guideline_collection_arguments(
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--baseline-checklist", type=Path, action="append", required=True)
     parser.add_argument("--exclude-csv", type=Path, action="append", required=True)
-    parser.add_argument("--license-allowlist-csv", type=Path, required=True)
+    parser.add_argument("--license-allowlist-csv", type=Path)
     parser.add_argument(
         "--prior-collection-dir",
         type=Path,
@@ -704,24 +713,26 @@ def _apply_guideline_checklist(arguments: argparse.Namespace) -> None:
         "output_dir": str(report.output_dir),
         "rejected_repositories": report.rejected_repositories,
         "reviewed_repositories": report.reviewed_repositories,
+        "status": "valid",
+        "advances_collection": False,
+        "next_action": "resume collection with this completed checklist",
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
 
 def _prepare_guideline_license_review(arguments: argparse.Namespace) -> None:
-    report = guideline_license.prepare_license_review(
-        input_dir=arguments.input_dir,
-        baseline_checklist_paths=tuple(arguments.baseline_checklist),
-        human_checklist_path=arguments.human_checklist,
+    report = guideline_license.prepare_collection_license_review(
+        collection_dir=arguments.collection_dir,
         output_dir=arguments.output_dir,
     )
     payload = {
         "blank_license_repositories": report.blank_license_repositories,
-        "legacy_baseline_checklists": report.legacy_baseline_checklists,
         "license_names": report.license_names,
         "other_license_repositories": report.other_license_repositories,
         "output_dir": str(report.output_dir),
         "repositories": report.repositories,
+        "status": "prepared",
+        "next_action": "create an allowlist and resume collection with --license-allowlist-csv",
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
@@ -738,6 +749,9 @@ def _apply_guideline_license_allowlist(arguments: argparse.Namespace) -> None:
         "input_repositories": report.input_repositories,
         "output_dir": str(report.output_dir),
         "rejected_repositories": report.rejected_repositories,
+        "preview_only": True,
+        "status": "preview_complete",
+        "next_action": "resume collection with --license-allowlist-csv",
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
@@ -758,6 +772,7 @@ def _finalize_guideline_collection(arguments: argparse.Namespace) -> None:
         "new_repositories": report.new_repositories,
         "output_dir": str(report.output_dir),
         "repositories": report.repositories,
+        "status": "complete",
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
@@ -770,12 +785,24 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
     )
     baseline_checklists = tuple(arguments.baseline_checklist)
     exclude_csvs = tuple(arguments.exclude_csv)
-    license_allowlist, review_state = _license_filtered_collection_review(
+    license_policy = guideline_license.load_collection_license_policy(
+        candidates,
+        allowlist_path=arguments.license_allowlist_csv,
+    )
+    _validate_collection_review_arguments(
+        license_policy,
+        human_checklist=arguments.human_checklist,
+        review_output_checklist=arguments.review_output_checklist,
+        prior_collection_dir=arguments.prior_collection_dir,
+        output_dir=arguments.output_dir,
+    )
+    review_state = _collection_review_state(
         candidates=candidates,
         baseline_checklists=baseline_checklists,
         human_checklist=arguments.human_checklist,
-        license_allowlist_path=arguments.license_allowlist_csv,
+        eligible_repositories=set(license_policy.eligible_repositories),
     )
+    _validate_license_policy_transition(arguments.output_dir, license_policy)
     license_eligible_repositories = set(review_state.eligible_repositories)
     baseline_repositories = set(review_state.baseline_repositories)
     manual_review = review_state.manual_review
@@ -810,7 +837,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         complete_schedule=complete_schedule,
     )
     configuration = {
-        "schema_version": 4,
+        "schema_version": 5,
         "repository_source": arguments.repository_source,
         "sampling_method": "stratified_random_per_language_until_quota",
         "sampling_unit": "repository",
@@ -824,12 +851,11 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         "input_fingerprints": _input_fingerprints(arguments.input_dir),
         "baseline_checklist_fingerprints": _path_fingerprints(baseline_checklists),
         "exclude_csv_fingerprints": _path_fingerprints(exclude_csvs),
-        "license_allowlist_fingerprints": _path_fingerprints((arguments.license_allowlist_csv,)),
         "prior_collection_fingerprints": dict(prior.fingerprints),
-        "license_allowlist": sorted(license_allowlist.license_names, key=str.casefold),
-        "license_ineligible_reviewed_repositories": sorted(
-            review_state.ineligible_accepted_repositories,
-            key=str.casefold,
+        **_collection_license_configuration(
+            license_policy,
+            allowlist_path=arguments.license_allowlist_csv,
+            ineligible_reviewed_repositories=review_state.ineligible_accepted_repositories,
         ),
         "classification_contract_sha256": markdown_batch.classification_contract_sha256(),
         "filter": markdown_filename_audit.filter_configuration(),
@@ -864,38 +890,18 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         arguments.output_dir / "sampling_manifest.csv",
         complete_schedule,
     )
-    github: github_client.GitHubClient | None = None
-    github_source: github_repository.PersistentGitHubRepositoryClient | None = None
-    if arguments.repository_source == "cache":
-        assert arguments.cache_root is not None
-        snapshot_inspector: markdown_candidate_extraction.SnapshotInspector | None = (
-            repository_cache.GitRepositoryCache(
-                root=arguments.cache_root,
-                command=arguments.git_command,
-            )
-        )
-        repository_client: markdown_filename_audit.MarkdownTreeClient = repository_tree.LocalRepositoryTreeClient(
-            cache=snapshot_inspector,
-            command=arguments.git_command,
-        )
-        skip_incomplete_repositories = True
-    else:
-        github = github_client.GitHubClient(token=github_credential())
-        github_source = github_repository.PersistentGitHubRepositoryClient(
-            client=github,
-            content_root=arguments.output_dir / "source-content",
-        )
-        repository_client = github_source
-        snapshot_inspector = None
-        skip_incomplete_repositories = False
-    auditor = markdown_filename_audit.MarkdownFilenameAuditor(client=repository_client, agent_evidence={})
+    source = _collection_repository_source(arguments)
+    auditor = markdown_filename_audit.MarkdownFilenameAuditor(
+        client=source.tree_client,
+        agent_evidence={},
+    )
     responses_client = _collection_classification_client(arguments)
     processor = guideline_collection.RepositoryFileProcessor(
         output_dir=arguments.output_dir,
         auditor=auditor,
-        repository_client=repository_client,
-        snapshot_inspector=snapshot_inspector,
-        skip_incomplete_repositories=skip_incomplete_repositories,
+        repository_client=source.blob_client,
+        snapshot_inspector=source.snapshot_inspector,
+        skip_incomplete_repositories=source.skip_incomplete_repositories,
         responses_client=responses_client,
         provider=arguments.provider,
         region=(
@@ -915,7 +921,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             "schema_version": 1,
             "filter": markdown_filename_audit.filter_configuration(),
             "repository_source": arguments.repository_source,
-            "skip_incomplete_repositories": skip_incomplete_repositories,
+            "skip_incomplete_repositories": source.skip_incomplete_repositories,
         },
     )
     report: guideline_collection.RepositoryCollectionReport | None = None
@@ -934,6 +940,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             max_screened_repositories=arguments.max_screened_repositories,
         )
     finally:
+        manual_review_ready = license_policy.is_reviewed and report is not None and report.target_reached
         guideline_collection_reports.write_collection_reports(
             output_dir=arguments.output_dir,
             population=candidates,
@@ -942,7 +949,7 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             baseline_repositories=baseline_repositories,
             baseline_repository_counts=baseline_repository_counts,
             target_total_repositories=arguments.target_total_repositories,
-            repository_client=repository_client,
+            repository_client=source.blob_client,
             confirmed_repositories=manual_review.confirmed_repositories,
             rejected_repositories=manual_review.rejected_repositories,
             prior_screenings=prior.eligible_screenings,
@@ -953,20 +960,47 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
             license_ineligible_reviewed_repositories=len(
                 review_state.ineligible_accepted_repositories,
             ),
-            source_metrics=github_source.report_metrics if github_source is not None else None,
+            source_metrics=source.github_source.report_metrics if source.github_source is not None else None,
+            license_policy_applied=license_policy.is_reviewed,
+            export_manual_review=manual_review_ready,
         )
         responses_client.close()
-        if github is not None:
-            github.close()
+        if source.github is not None:
+            source.github.close()
     assert report is not None
-    source_metrics = github_source.report_metrics() if github_source is not None else {}
-    payload = {
+    source_metrics = source.github_source.report_metrics() if source.github_source is not None else {}
+    payload = _collection_report_payload(
+        arguments,
+        report=report,
+        review_state=review_state,
+        excluded_repositories=excluded_repositories,
+        source_metrics=source_metrics,
+        license_policy_applied=license_policy.is_reviewed,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
+
+
+def _collection_report_payload(
+    arguments: argparse.Namespace,
+    *,
+    report: guideline_collection.RepositoryCollectionReport,
+    review_state: guideline_collection.EligibilityFilteredReviewState,
+    excluded_repositories: set[str],
+    source_metrics: Mapping[str, object],
+    license_policy_applied: bool,
+) -> dict[str, object]:
+    workflow = guideline_workflow.collection_workflow_status(
+        license_policy_applied=license_policy_applied,
+        target_reached=report.target_reached,
+        human_target_reached=report.human_target_reached,
+    )
+    return {
         "baseline_repositories": report.baseline_repositories,
         "excluded_repositories": len(excluded_repositories),
         "new_repository_target": report.new_repository_target,
         "confirmed_new_repositories": report.confirmed_new_repositories,
         "pending_new_repositories": report.pending_new_repositories,
-        "rejected_new_repositories": len(manual_review.rejected_repositories),
+        "rejected_new_repositories": len(review_state.manual_review.rejected_repositories),
         "selected_new_repositories": report.selected_new_repositories,
         "selected_total_repositories": report.baseline_repositories + report.selected_new_repositories,
         "target_repositories_by_language": report.target_repositories_by_language,
@@ -984,10 +1018,15 @@ def _collect_guideline_repositories(arguments: argparse.Namespace) -> None:
         ),
         "target_reached": report.target_reached,
         "human_target_reached": report.human_target_reached,
+        "license_policy_status": "applied" if license_policy_applied else "pending",
+        "workflow_stage": workflow.stage.value,
+        "next_action": workflow.next_action,
+        "ready_for_license_review": workflow.ready_for_license_review,
+        "manual_review_ready": workflow.manual_review_ready,
+        "ready_to_finalize": workflow.ready_to_finalize,
         "output_dir": str(arguments.output_dir),
         **source_metrics,
     }
-    print(json.dumps(payload, indent=2, ensure_ascii=True, sort_keys=True))
 
 
 def _validate_collection_repository_source(arguments: argparse.Namespace) -> None:
@@ -997,24 +1036,132 @@ def _validate_collection_repository_source(arguments: argparse.Namespace) -> Non
         raise ValueError("--cache-root cannot be used when --repository-source=github")
 
 
-def _license_filtered_collection_review(
+def _collection_repository_source(arguments: argparse.Namespace) -> _CollectionRepositorySource:
+    if arguments.repository_source == "cache":
+        assert arguments.cache_root is not None
+        snapshot_inspector = repository_cache.GitRepositoryCache(
+            root=arguments.cache_root,
+            command=arguments.git_command,
+        )
+        local_client = repository_tree.LocalRepositoryTreeClient(
+            cache=snapshot_inspector,
+            command=arguments.git_command,
+        )
+        return _CollectionRepositorySource(
+            tree_client=local_client,
+            blob_client=local_client,
+            snapshot_inspector=snapshot_inspector,
+            skip_incomplete_repositories=True,
+        )
+    github = github_client.GitHubClient(token=github_credential())
+    github_source = github_repository.PersistentGitHubRepositoryClient(
+        client=github,
+        content_root=arguments.output_dir / "source-content",
+    )
+    return _CollectionRepositorySource(
+        tree_client=github_source,
+        blob_client=github_source,
+        snapshot_inspector=None,
+        skip_incomplete_repositories=False,
+        github=github,
+        github_source=github_source,
+    )
+
+
+def _collection_review_state(
     *,
     candidates: Sequence[repository.RepositoryCandidate],
     baseline_checklists: Sequence[Path],
     human_checklist: Path | None,
-    license_allowlist_path: Path,
-) -> tuple[guideline_license.LicenseAllowlist, guideline_collection.EligibilityFilteredReviewState]:
-    allowlist = guideline_license.load_license_allowlist(license_allowlist_path)
-    eligible_repositories = {
-        candidate.repository.casefold() for candidate in candidates if allowlist.allows(candidate.license_name)
-    }
-    review_state = guideline_collection.filter_review_state_by_repository_eligibility(
+    eligible_repositories: set[str],
+) -> guideline_collection.EligibilityFilteredReviewState:
+    return guideline_collection.filter_review_state_by_repository_eligibility(
         baseline_repositories=guideline_collection.load_baseline_repositories(baseline_checklists),
         manual_review=guideline_collection.load_manual_review_state(human_checklist),
         eligible_repositories=eligible_repositories,
         population=candidates,
     )
-    return allowlist, review_state
+
+
+def _collection_license_configuration(
+    policy: guideline_license.CollectionLicensePolicy,
+    *,
+    allowlist_path: Path | None,
+    ineligible_reviewed_repositories: frozenset[str],
+) -> dict[str, object]:
+    if not policy.is_reviewed:
+        return {
+            "license_policy_status": "pending",
+            "license_allowlist": [],
+            "license_allowlist_fingerprints": {},
+            "license_ineligible_reviewed_repositories": [],
+        }
+    assert policy.allowlist is not None
+    assert allowlist_path is not None
+    return {
+        "license_policy_status": "applied",
+        "license_allowlist": sorted(policy.allowlist.license_names, key=str.casefold),
+        "license_allowlist_fingerprints": _path_fingerprints((allowlist_path,)),
+        "license_ineligible_reviewed_repositories": sorted(
+            ineligible_reviewed_repositories,
+            key=str.casefold,
+        ),
+    }
+
+
+def _validate_collection_review_arguments(
+    policy: guideline_license.CollectionLicensePolicy,
+    *,
+    human_checklist: Path | None,
+    review_output_checklist: Path | None,
+    prior_collection_dir: Path | None,
+    output_dir: Path,
+) -> None:
+    stored_status = _stored_license_policy_status(output_dir)
+    is_provisional = not policy.is_reviewed or stored_status == "pending"
+    if is_provisional and (output_dir / "manual-review").exists():
+        raise ValueError("provisional collection contains file-review artifacts")
+    if not policy.is_reviewed:
+        carries_prior_review = human_checklist is not None and prior_collection_dir is not None
+        if review_output_checklist is not None or (human_checklist is not None and not carries_prior_review):
+            raise ValueError("license review must finish before file review")
+        return
+    applies_policy_to_existing_collection = stored_status == "pending"
+    carries_prior_review = human_checklist is not None and prior_collection_dir is not None
+    if applies_policy_to_existing_collection and human_checklist is not None and not carries_prior_review:
+        raise ValueError("file review cannot be applied during license policy transition")
+
+
+def _stored_license_policy_status(output_dir: Path) -> str | None:
+    configuration_path = output_dir / "collection_configuration.json"
+    if not configuration_path.exists():
+        return None
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    if not isinstance(configuration, dict):
+        return None
+    status = configuration.get("license_policy_status")
+    return status if isinstance(status, str) else None
+
+
+def _validate_license_policy_transition(
+    output_dir: Path,
+    policy: guideline_license.CollectionLicensePolicy,
+) -> None:
+    configuration_path = output_dir / "collection_configuration.json"
+    if not configuration_path.exists():
+        if policy.is_reviewed:
+            raise ValueError("start the provisional collection without an allowlist")
+        return
+    status = _stored_license_policy_status(output_dir)
+    if not policy.is_reviewed:
+        if status == "applied":
+            raise ValueError("applied license policy requires its allowlist")
+        return
+    if status != "pending":
+        return
+    summary = json.loads((output_dir / "collection_summary.json").read_text(encoding="utf-8"))
+    if not isinstance(summary, dict) or summary.get("target_reached") is not True:
+        raise ValueError("provisional repository target is not reached")
 
 
 def _license_filtered_collection_schedules(

@@ -1,7 +1,8 @@
 # ADR-0021: Apply license policy after stratified sampling
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-18
+- Superseded by: ADR-0023
 
 In the context of balancing a redistributable benchmark across four language
 strata, facing both license-based repository rejection and the need to preserve
