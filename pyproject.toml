@@ -33,6 +33,7 @@ known_first_party = [
   "guideline_finalization",
   "guideline_license",
   "guideline_review",
+  "guideline_workflow",
   "github_repository",
   "main",
   "markdown_audit",

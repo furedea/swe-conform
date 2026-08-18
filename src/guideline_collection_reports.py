@@ -2,10 +2,12 @@
 
 import csv
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import guideline_collection
+import guideline_workflow
 import markdown_cache_classification
 import markdown_cache_results
 import markdown_review
@@ -18,34 +20,66 @@ _SCREENED_REPOSITORIES_FILENAME = "screened_repositories.csv"
 _SELECTED_REPOSITORIES_FILENAME = "selected_repositories.csv"
 _SUMMARY_FILENAME = "collection_summary.json"
 _UNRESOLVED_FILES_FILENAME = "unresolved_files.csv"
+_SELECTED_REPOSITORY_FIELDS = (
+    "repository",
+    "revision",
+    "sampling_language",
+    "license_name",
+    "origin",
+    "sample_order",
+)
 
 
 def write_collection_reports(
     *,
     output_dir: Path,
     population: Sequence[repository.RepositoryCandidate],
+    schedule: Sequence[repository_sampling.ScheduledRepository],
     store: guideline_collection.RepositoryCollectionStore,
     baseline_repositories: set[str],
+    baseline_repository_counts: Mapping[str, int],
     target_total_repositories: int,
     repository_client: markdown_cache_classification.BlobClient,
     confirmed_repositories: set[str] | None = None,
     rejected_repositories: set[str] | None = None,
+    prior_screenings: Sequence[guideline_collection.RepositoryScreening] = (),
     review_checklist_path: Path | None = None,
     review_output_checklist_path: Path | None = None,
     max_screened_repositories: int | None = None,
     screening_limit_reached: bool = False,
+    license_ineligible_reviewed_repositories: int = 0,
     source_metrics: Callable[[], Mapping[str, object]] | None = None,
+    license_policy_applied: bool = True,
+    export_manual_review: bool = True,
 ) -> None:
     """Materialize file and repository views from durable checkpoints."""
-    new_target = target_total_repositories - len(baseline_repositories)
+    new_targets = guideline_collection.new_repository_targets_by_language(
+        baseline_repository_counts,
+        target_total_repositories=target_total_repositories,
+    )
     confirmed = set(confirmed_repositories or ())
     rejected = set(rejected_repositories or ())
-    remaining_target = new_target - len(confirmed)
-    pending = store.selected(remaining_target, excluded_repositories=confirmed | rejected)
     confirmed_names = {name.casefold() for name in confirmed}
     confirmed_results = tuple(
-        result for result in store.results() if result.scheduled.candidate.repository.casefold() in confirmed_names
+        guideline_collection.RepositoryScreening(item, status="pass")
+        for item in schedule
+        if item.candidate.repository.casefold() in confirmed_names
     )
+    if len(confirmed_results) != len(confirmed_names):
+        raise ValueError("confirmed repository is absent from the sampling schedule")
+    confirmed_counter = Counter(result.scheduled.language for result in confirmed_results)
+    confirmed_counts = {language: confirmed_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
+    remaining_targets = guideline_collection.remaining_repository_targets_by_language(
+        new_targets,
+        confirmed_counts=confirmed_counts,
+    )
+    pending = store.selected_by_language(
+        remaining_targets,
+        excluded_repositories=confirmed | rejected,
+        included_orders={item.sample_order for item in schedule},
+    )
+    pending_counter = Counter(result.scheduled.language for result in pending)
+    pending_counts = {language: pending_counter[language] for language in repository_sampling.DEFAULT_LANGUAGES}
     selected = tuple(
         sorted(
             (*confirmed_results, *pending),
@@ -71,19 +105,29 @@ def write_collection_reports(
         confirmed_repositories=confirmed,
     )
     selected_file_rows = tuple(row for row in file_rows if str(row["name"]).casefold() in selected_names)
-    markdown_review.export_cached_review_files(
-        classified_rows=selected_file_rows,
-        repository_client=repository_client,
-        output_dir=output_dir / "manual-review",
-        existing_checklist_path=review_checklist_path,
-        checklist_path=review_output_checklist_path,
-    )
+    if export_manual_review:
+        markdown_review.export_cached_review_files(
+            classified_rows=selected_file_rows,
+            repository_client=repository_client,
+            output_dir=output_dir / "manual-review",
+            existing_checklist_path=review_checklist_path,
+            checklist_path=review_output_checklist_path,
+        )
     _write_summary(
         output_dir=output_dir,
-        baseline_count=len(baseline_repositories),
+        baseline_counts=baseline_repository_counts,
         confirmed_count=len(confirmed),
+        confirmed_counts=confirmed_counts,
         pending_count=len(pending),
+        pending_counts=pending_counts,
         rejected_count=len(rejected),
+        carried_screened_count=len(
+            {
+                result.scheduled.candidate.repository.casefold()
+                for result in prior_screenings
+                if result.status in {"pass", "not_found", "no_candidates"}
+            },
+        ),
         processed_count=len(store.results()),
         target_total=target_total_repositories,
         file_rows=file_rows,
@@ -91,6 +135,9 @@ def write_collection_reports(
         unresolved_count=len(unresolved),
         max_screened_repositories=max_screened_repositories,
         screening_limit_reached=screening_limit_reached,
+        license_ineligible_reviewed_repositories=license_ineligible_reviewed_repositories,
+        license_policy_applied=license_policy_applied,
+        manual_review_exported=export_manual_review,
         source_metrics=source_metrics() if source_metrics is not None else {},
     )
 
@@ -175,7 +222,7 @@ def _write_repository_reports(
     _write_csv(
         output_dir / _SELECTED_REPOSITORIES_FILENAME,
         selected_rows,
-        fallback_fields=("repository", "revision", "sampling_language", "origin", "sample_order"),
+        fallback_fields=_SELECTED_REPOSITORY_FIELDS,
     )
 
 
@@ -189,6 +236,7 @@ def _selected_repository_row(
         "repository": candidate.repository,
         "revision": candidate.revision,
         "sampling_language": result.scheduled.language,
+        "license_name": candidate.license_name,
         "origin": "new_confirmed" if candidate.repository.casefold() in confirmed_names else "new_pending",
         "sample_order": result.scheduled.sample_order,
     }
@@ -204,6 +252,7 @@ def _baseline_repository_row(
         "repository": repository_name,
         "revision": candidate.revision if candidate is not None else "",
         "sampling_language": candidate.fields.get("mainLanguage", "") if candidate is not None else "",
+        "license_name": candidate.license_name if candidate is not None else "",
         "origin": "baseline",
         "sample_order": "",
     }
@@ -212,10 +261,13 @@ def _baseline_repository_row(
 def _write_summary(
     *,
     output_dir: Path,
-    baseline_count: int,
+    baseline_counts: Mapping[str, int],
     confirmed_count: int,
+    confirmed_counts: Mapping[str, int],
     pending_count: int,
+    pending_counts: Mapping[str, int],
     rejected_count: int,
+    carried_screened_count: int,
     processed_count: int,
     target_total: int,
     file_rows: Sequence[Mapping[str, object]],
@@ -223,9 +275,33 @@ def _write_summary(
     unresolved_count: int,
     max_screened_repositories: int | None,
     screening_limit_reached: bool,
+    license_ineligible_reviewed_repositories: int,
+    license_policy_applied: bool,
+    manual_review_exported: bool,
     source_metrics: Mapping[str, object],
 ) -> None:
+    target_counts = guideline_collection.target_repository_counts_by_language(target_total)
+    selected_counts = {
+        language: baseline_counts[language] + confirmed_counts.get(language, 0) + pending_counts.get(language, 0)
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    remaining_counts = {
+        language: target_counts[language] - selected_counts[language]
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    }
+    baseline_count = sum(baseline_counts.values())
     new_target = target_total - baseline_count
+    target_reached = all(not count for count in remaining_counts.values())
+    human_target_reached = all(
+        baseline_counts[language] + confirmed_counts.get(language, 0) >= target_counts[language]
+        for language in repository_sampling.DEFAULT_LANGUAGES
+    )
+    workflow = guideline_workflow.collection_workflow_status(
+        license_policy_applied=license_policy_applied,
+        target_reached=target_reached,
+        human_target_reached=human_target_reached,
+    )
+    llm_positive_files = sum(row["status"] in {"pass", "review"} for row in selected_file_rows)
     _write_json(
         output_dir / _SUMMARY_FILENAME,
         {
@@ -234,16 +310,31 @@ def _write_summary(
             "confirmed_new_repositories": confirmed_count,
             "pending_new_repositories": pending_count,
             "rejected_new_repositories": rejected_count,
+            "carried_screened_repositories": carried_screened_count,
             "selected_new_repositories": confirmed_count + pending_count,
             "selected_total_repositories": baseline_count + confirmed_count + pending_count,
             "processed_repositories": processed_count,
             "max_screened_repositories": max_screened_repositories,
             "screening_limit_reached": screening_limit_reached,
+            "license_ineligible_reviewed_repositories": license_ineligible_reviewed_repositories,
             "target_total_repositories": target_total,
-            "target_reached": confirmed_count + pending_count >= new_target,
-            "human_target_reached": confirmed_count >= new_target,
+            "target_repositories_by_language": target_counts,
+            "baseline_repositories_by_language": dict(baseline_counts),
+            "confirmed_new_repositories_by_language": dict(confirmed_counts),
+            "pending_new_repositories_by_language": dict(pending_counts),
+            "selected_repositories_by_language": selected_counts,
+            "remaining_repositories_by_language": remaining_counts,
+            "target_reached": target_reached,
+            "human_target_reached": human_target_reached,
+            "license_policy_status": "applied" if license_policy_applied else "pending",
+            "workflow_stage": workflow.stage.value,
+            "next_action": workflow.next_action,
+            "ready_for_license_review": workflow.ready_for_license_review,
+            "manual_review_ready": workflow.manual_review_ready,
+            "ready_to_finalize": workflow.ready_to_finalize,
             "classified_files": len(file_rows),
-            "manual_review_files": sum(row["status"] in {"pass", "review"} for row in selected_file_rows),
+            "llm_positive_files": llm_positive_files,
+            "manual_review_files": llm_positive_files if manual_review_exported else 0,
             "unresolved_files": unresolved_count,
             **source_metrics,
         },

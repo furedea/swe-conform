@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import guideline_license
 import guideline_review
 
 _CONFIGURATION_FILENAME = "collection_configuration.json"
@@ -19,6 +20,8 @@ _REPOSITORIES_FILENAME = "repositories.csv"
 _GUIDELINE_FILES_FILENAME = "guideline_files.csv"
 _SUMMARY_FILENAME = "summary.json"
 _PROVENANCE_FILENAME = "provenance.json"
+_COLLECTION_SCHEMA_VERSION = 5
+_LEGACY_COLLECTION_SCHEMA_VERSION = 4
 _FINAL_FILENAMES = frozenset(
     {
         _REPOSITORIES_FILENAME,
@@ -34,7 +37,15 @@ _SELECTED_FIELDS = (
     "origin",
     "sample_order",
 )
-_REPOSITORY_FIELDS = (*_SELECTED_FIELDS, "guideline_file_count")
+_REPOSITORY_FIELDS = (
+    "repository",
+    "revision",
+    "sampling_language",
+    "license_name",
+    "origin",
+    "sample_order",
+    "guideline_file_count",
+)
 _GUIDELINE_FIELDS = (
     "repository",
     "revision",
@@ -64,9 +75,15 @@ _CLASSIFICATION_CONFIGURATION_FIELDS = (
 )
 _COLLECTION_CONFIGURATION_FIELDS = (
     "languages",
+    "license_allowlist",
+    "license_allowlist_fingerprints",
+    "license_ineligible_reviewed_repositories",
+    "license_policy_status",
+    "prior_collection_fingerprints",
     "sample_seed",
     "sampling_method",
     "target_total_repositories",
+    "target_repositories_by_language",
 )
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -89,6 +106,7 @@ def finalize_guideline_collection(
     collection_dir: Path,
     baseline_checklist_paths: Sequence[Path],
     human_checklist_path: Path,
+    license_allowlist_path: Path,
     output_dir: Path,
 ) -> GuidelineFinalizationReport:
     """Validate all final inputs before writing deterministic collection artifacts."""
@@ -96,8 +114,12 @@ def finalize_guideline_collection(
     configuration_path = collection_dir / _CONFIGURATION_FILENAME
     selected_path = collection_dir / _SELECTED_REPOSITORIES_FILENAME
     configuration = _read_json(configuration_path)
+    _validate_collection_configuration_schema(configuration)
     selected = _selected_repositories(selected_path)
+    license_allowlist = _validated_license_allowlist(configuration, path=license_allowlist_path)
+    _validate_selected_licenses(license_allowlist, selected=selected)
     _validate_baseline_fingerprints(configuration, baseline_checklist_paths)
+    prior_collection_paths = _validated_prior_collection_paths(configuration)
     sources = [
         *(
             _review_source(path, origin="baseline", require_duplicate_column=False)
@@ -105,14 +127,25 @@ def finalize_guideline_collection(
         ),
         _review_source(human_checklist_path, origin="new", require_duplicate_column=True),
     ]
+    license_ineligible_repositories = _license_ineligible_reviewed_repositories(configuration)
     accepted = tuple(
-        (source_path, origin, row) for source_path, origin, rows in sources for row in rows if _is_accepted(row)
+        (source_path, origin, row)
+        for source_path, origin, rows in sources
+        for row in rows
+        if _is_accepted(row)
+        if row["repository"].strip().casefold() not in license_ineligible_repositories
     )
     repositories_by_name = {row["repository"].casefold(): row for row in selected}
     _validate_repository_sets(configuration, selected=selected, accepted=accepted)
     guideline_rows = _guideline_rows(accepted, repositories_by_name=repositories_by_name)
     repository_rows = _repository_rows(selected, guideline_rows=guideline_rows)
-    summary = _summary(configuration, sources=sources, guideline_rows=guideline_rows, selected=selected)
+    summary = _summary(
+        configuration,
+        sources=sources,
+        guideline_rows=guideline_rows,
+        selected=selected,
+        license_ineligible_repositories=license_ineligible_repositories,
+    )
     repository_text = _csv_text(_REPOSITORY_FIELDS, repository_rows)
     guideline_text = _csv_text(_GUIDELINE_FIELDS, guideline_rows)
     summary_text = _json_text(summary)
@@ -122,6 +155,8 @@ def finalize_guideline_collection(
         selected_path=selected_path,
         baseline_checklist_paths=baseline_checklist_paths,
         human_checklist_path=human_checklist_path,
+        license_allowlist_path=license_allowlist_path,
+        prior_collection_paths=prior_collection_paths,
         artifacts={
             _REPOSITORIES_FILENAME: _sha256_text(repository_text),
             _GUIDELINE_FILES_FILENAME: _sha256_text(guideline_text),
@@ -156,6 +191,16 @@ def _validate_output_dir(output_dir: Path) -> None:
     unexpected = sorted(path.name for path in output_dir.iterdir() if path.name not in _FINAL_FILENAMES)
     if unexpected:
         raise ValueError(f"unexpected final output artifact: {unexpected[0]}")
+
+
+def _validate_collection_configuration_schema(configuration: Mapping[str, object]) -> None:
+    schema_version = configuration.get("schema_version")
+    if schema_version == _COLLECTION_SCHEMA_VERSION:
+        if configuration.get("license_policy_status") != "applied":
+            raise ValueError("collection license policy must be applied before finalization")
+        return
+    if schema_version != _LEGACY_COLLECTION_SCHEMA_VERSION:
+        raise ValueError("unsupported collection configuration schema")
 
 
 def _review_source(
@@ -215,6 +260,34 @@ def _validate_baseline_fingerprints(
         raise ValueError("baseline checklist fingerprints do not match collection configuration")
 
 
+def _validated_prior_collection_paths(configuration: Mapping[str, object]) -> tuple[Path, ...]:
+    raw_fingerprints = configuration.get("prior_collection_fingerprints")
+    if not isinstance(raw_fingerprints, dict) or any(
+        not isinstance(path, str) or not isinstance(fingerprint, str) for path, fingerprint in raw_fingerprints.items()
+    ):
+        raise ValueError("collection configuration has invalid prior collection fingerprints")
+    expected_names = {
+        "collection_configuration.json",
+        "repository_attempts.jsonl",
+        "sampling_manifest.csv",
+    }
+    if raw_fingerprints and (
+        len(raw_fingerprints) != len(expected_names)
+        or {Path(path).name for path in raw_fingerprints if isinstance(path, str)} != expected_names
+    ):
+        raise ValueError("collection configuration has invalid prior collection fingerprints")
+    fingerprints = {
+        path: fingerprint
+        for path, fingerprint in raw_fingerprints.items()
+        if isinstance(path, str) and isinstance(fingerprint, str)
+    }
+    paths = tuple(Path(path) for path in fingerprints)
+    for path in paths:
+        if _sha256_file(path) != fingerprints[str(path)]:
+            raise ValueError(f"prior collection fingerprint does not match: {path}")
+    return paths
+
+
 def _validate_repository_sets(
     configuration: Mapping[str, object],
     *,
@@ -224,6 +297,7 @@ def _validate_repository_sets(
     target = configuration.get("target_total_repositories")
     if not isinstance(target, int) or len(selected) != target:
         raise ValueError(f"selected repository count does not match target: {len(selected)} != {target}")
+    _validate_repository_language_counts(configuration, selected=selected)
     selected_by_origin = {
         origin: {row["repository"].strip().casefold() for row in selected if row["origin"] == origin}
         for origin in ("baseline", "new")
@@ -241,6 +315,80 @@ def _validate_repository_sets(
     for origin in ("baseline", "new"):
         if selected_by_origin[origin] != accepted_by_origin[origin]:
             raise ValueError(f"selected {origin} repositories do not match human-accepted repositories")
+
+
+def _validate_repository_language_counts(
+    configuration: Mapping[str, object],
+    *,
+    selected: Sequence[Mapping[str, str]],
+) -> None:
+    targets = configuration.get("target_repositories_by_language")
+    languages = configuration.get("languages")
+    if not isinstance(targets, dict) or not isinstance(languages, list):
+        raise ValueError("collection configuration has invalid language targets")
+    parsed_targets: dict[str, int] = {}
+    for language, count in targets.items():
+        if not isinstance(language, str) or not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise ValueError("collection configuration has invalid language targets")
+        parsed_targets[language] = count
+    if set(parsed_targets) != {str(language) for language in languages}:
+        raise ValueError("collection configuration has invalid language targets")
+    if sum(parsed_targets.values()) != configuration["target_total_repositories"]:
+        raise ValueError("collection configuration has invalid language targets")
+    expected = Counter(parsed_targets)
+    actual = Counter(row["sampling_language"] for row in selected)
+    if actual != expected:
+        raise ValueError("selected repository language counts do not match target")
+
+
+def _validated_license_allowlist(
+    configuration: Mapping[str, object],
+    *,
+    path: Path,
+) -> guideline_license.LicenseAllowlist:
+    raw_allowlist = configuration.get("license_allowlist")
+    if not isinstance(raw_allowlist, list) or any(not isinstance(name, str) for name in raw_allowlist):
+        raise ValueError("collection configuration has no license allowlist")
+    configured_names = tuple(name for name in raw_allowlist if isinstance(name, str))
+    configured = guideline_license.LicenseAllowlist(frozenset(configured_names))
+    if len(configured.license_names) != len(configured_names) or any(
+        not configured.allows(name) for name in configured_names
+    ):
+        raise ValueError("collection configuration has an invalid license allowlist")
+    raw_fingerprints = configuration.get("license_allowlist_fingerprints")
+    if not isinstance(raw_fingerprints, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in raw_fingerprints.items()
+    ):
+        raise ValueError("collection configuration has no license allowlist fingerprint")
+    fingerprints = tuple(value for value in raw_fingerprints.values() if isinstance(value, str))
+    if len(fingerprints) != 1 or _sha256_file(path) != fingerprints[0]:
+        raise ValueError("license allowlist fingerprint does not match collection configuration")
+    loaded = guideline_license.load_license_allowlist(path)
+    if loaded != configured:
+        raise ValueError("license allowlist does not match collection configuration")
+    return loaded
+
+
+def _validate_selected_licenses(
+    allowlist: guideline_license.LicenseAllowlist,
+    *,
+    selected: Sequence[Mapping[str, str]],
+) -> None:
+    for row in selected:
+        if not allowlist.allows(row.get("license_name", "")):
+            raise ValueError(
+                f"selected repository license is not allowlisted: {row['repository']}",
+            )
+
+
+def _license_ineligible_reviewed_repositories(configuration: Mapping[str, object]) -> set[str]:
+    raw_repositories = configuration.get("license_ineligible_reviewed_repositories")
+    if not isinstance(raw_repositories, list) or any(
+        not isinstance(repository_name, str) or not repository_name.strip() for repository_name in raw_repositories
+    ):
+        raise ValueError("collection configuration has invalid license-ineligible reviewed repositories")
+    repositories = tuple(repository_name for repository_name in raw_repositories if isinstance(repository_name, str))
+    return {repository_name.strip().casefold() for repository_name in repositories}
 
 
 def _guideline_rows(
@@ -314,6 +462,7 @@ def _repository_rows(
     return tuple(
         {
             **{field: row[field] for field in _SELECTED_FIELDS},
+            "license_name": row.get("license_name", ""),
             "guideline_file_count": counts[row["repository"].casefold()],
         }
         for row in sorted(selected, key=lambda row: row["repository"].casefold())
@@ -326,12 +475,17 @@ def _summary(
     sources: Sequence[tuple[Path, str, Sequence[Mapping[str, str]]]],
     guideline_rows: Sequence[Mapping[str, str]],
     selected: Sequence[Mapping[str, str]],
+    license_ineligible_repositories: set[str],
 ) -> dict[str, object]:
     repository_origins = Counter(row["origin"] for row in selected)
     file_origins = Counter(row["origin"] for row in guideline_rows)
     languages = Counter(row["sampling_language"] for row in selected)
     review_origins = Counter(row["review_origin"] for row in guideline_rows)
     reviewed_rows = [row for _, _, rows in sources for row in rows]
+    license_ineligible_files = sum(
+        _is_accepted(row) and row["repository"].strip().casefold() in license_ineligible_repositories
+        for row in reviewed_rows
+    )
     return {
         "schema_version": 1,
         "status": "passed",
@@ -351,6 +505,7 @@ def _summary(
             "total": len(reviewed_rows),
             "accepted": len(guideline_rows),
             "duplicates": sum(bool(row.get("duplicate_of", "").strip()) for row in reviewed_rows),
+            "license_ineligible": license_ineligible_files,
             "not_found": sum(row["human_decision"].strip() == "not_found" for row in reviewed_rows),
         },
         "target_total_repositories": configuration["target_total_repositories"],
@@ -360,6 +515,7 @@ def _summary(
             "file_ids_unique": True,
             "github_urls_unique": True,
             "human_decisions_complete": True,
+            "licenses_allowlisted": True,
             "repository_count_matches_target": True,
             "repository_sets_match": True,
             "revisions_match": True,
@@ -374,6 +530,8 @@ def _provenance(
     selected_path: Path,
     baseline_checklist_paths: Sequence[Path],
     human_checklist_path: Path,
+    license_allowlist_path: Path,
+    prior_collection_paths: Sequence[Path],
     artifacts: Mapping[str, str],
 ) -> dict[str, object]:
     sources = [
@@ -381,6 +539,8 @@ def _provenance(
         _source_record(selected_path, role="selected_repositories"),
         *(_source_record(path, role="baseline_checklist") for path in baseline_checklist_paths),
         _source_record(human_checklist_path, role="human_checklist"),
+        _source_record(license_allowlist_path, role="license_allowlist"),
+        *(_source_record(path, role="prior_collection") for path in prior_collection_paths),
     ]
     return {
         "schema_version": 1,

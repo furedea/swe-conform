@@ -7,98 +7,121 @@ from pathlib import Path
 import pytest
 
 import guideline_license
+import repository
 
 
-def test_license_review_contains_only_repositories_with_non_duplicate_human_passes(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(
-        input_dir,
-        (
-            ("example/accepted", "MIT License"),
-            ("example/duplicate-only", "Apache License 2.0"),
-            ("example/rejected", "BSD 3-Clause New or Revised License"),
-        ),
+def test_collection_license_policy_keeps_all_repositories_pending_before_review() -> None:
+    candidates = (
+        _candidate("example/mit", "MIT License"),
+        _candidate("example/gpl", "GNU GPL v3.0"),
     )
-    checklist_path = tmp_path / "checklist.csv"
-    _write_checklist(
-        checklist_path,
+
+    policy = guideline_license.load_collection_license_policy(candidates, allowlist_path=None)
+
+    assert not policy.is_reviewed
+    assert policy.allowlist is None
+    assert policy.eligible_repositories == frozenset({"example/mit", "example/gpl"})
+
+
+def test_license_review_uses_provisional_selected_repositories(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=2,
+    )
+    _write_collection_summary(collection_dir, target_reached=True, selected_repositories=2)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
         (
-            _review_row("example/accepted", "accepted.md", human_decision="pass"),
-            _review_row(
-                "example/duplicate-only",
-                "duplicate.md",
-                human_decision="pass",
-                duplicate_of="accepted.md",
-            ),
-            _review_row("example/rejected", "rejected.md", human_decision="not_found"),
+            ("example/baseline", "MIT License", "baseline"),
+            ("example/new", "Apache License 2.0", "new_pending"),
         ),
     )
     output_dir = tmp_path / "license-review"
 
-    guideline_license.prepare_license_review(
-        input_dir=input_dir,
-        baseline_checklist_paths=(),
-        human_checklist_path=checklist_path,
-        output_dir=output_dir,
-    )
-
-    assert _read_csv(output_dir / "repository_licenses.csv") == [
-        {"repository": "example/accepted", "license_name": "MIT License"},
-    ]
-
-
-def test_legacy_baseline_without_duplicate_column_treats_pass_as_non_duplicate(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(
-        input_dir,
-        (
-            ("example/baseline", "MIT License"),
-            ("example/current", "Apache License 2.0"),
-        ),
-    )
-    baseline_path = tmp_path / "baseline.csv"
-    baseline_row = _review_row("example/baseline", "baseline.md", human_decision="pass")
-    del baseline_row["duplicate_of"]
-    _write_checklist(baseline_path, (baseline_row,))
-    human_path = tmp_path / "human.csv"
-    _write_checklist(
-        human_path,
-        (_review_row("example/current", "current.md", human_decision="pass"),),
-    )
-    output_dir = tmp_path / "license-review"
-
-    guideline_license.prepare_license_review(
-        input_dir=input_dir,
-        baseline_checklist_paths=(baseline_path,),
-        human_checklist_path=human_path,
+    guideline_license.prepare_collection_license_review(
+        collection_dir=collection_dir,
         output_dir=output_dir,
     )
 
     assert _read_csv(output_dir / "repository_licenses.csv") == [
         {"repository": "example/baseline", "license_name": "MIT License"},
-        {"repository": "example/current", "license_name": "Apache License 2.0"},
+        {"repository": "example/new", "license_name": "Apache License 2.0"},
     ]
 
 
-def test_license_review_rejects_an_accepted_repository_without_license_metadata(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(input_dir, (("example/available", "MIT License"),))
-    checklist_path = tmp_path / "checklist.csv"
-    _write_checklist(
-        checklist_path,
-        (_review_row("example/missing", "rules.md", human_decision="pass"),),
+def test_license_review_rejects_an_incomplete_provisional_selection(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=1,
+    )
+    _write_collection_summary(collection_dir, target_reached=False, selected_repositories=1)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (("example/pending", "MIT License", "new_pending"),),
     )
     output_dir = tmp_path / "license-review"
 
-    with pytest.raises(ValueError, match=r"license metadata is missing.*example/missing"):
-        guideline_license.prepare_license_review(
-            input_dir=input_dir,
-            baseline_checklist_paths=(),
-            human_checklist_path=checklist_path,
+    with pytest.raises(ValueError, match="provisional repository target is not reached"):
+        guideline_license.prepare_collection_license_review(
+            collection_dir=collection_dir,
             output_dir=output_dir,
         )
 
     assert not output_dir.exists()
+
+
+def test_license_review_rejects_a_collection_with_an_applied_policy(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="applied",
+        selected_repositories=1,
+    )
+    _write_collection_summary(collection_dir, target_reached=True, selected_repositories=1)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (("example/selected", "MIT License", "new_pending"),),
+    )
+
+    with pytest.raises(ValueError, match="collection license review is already complete"):
+        guideline_license.prepare_collection_license_review(
+            collection_dir=collection_dir,
+            output_dir=tmp_path / "license-review",
+        )
+
+
+def test_license_review_rejects_a_selection_that_does_not_match_its_recorded_quota(
+    tmp_path: Path,
+) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=2,
+    )
+    _write_collection_summary(
+        collection_dir,
+        target_reached=True,
+        selected_repositories=2,
+    )
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (("example/only-one", "MIT License", "new_pending"),),
+    )
+
+    with pytest.raises(ValueError, match="provisional selection does not match recorded quotas"):
+        guideline_license.prepare_collection_license_review(
+            collection_dir=collection_dir,
+            output_dir=tmp_path / "license-review",
+        )
 
 
 def test_license_allowlist_always_rejects_blank_and_other_license_names(tmp_path: Path) -> None:
@@ -140,30 +163,46 @@ def test_license_allowlist_always_rejects_blank_and_other_license_names(tmp_path
     ]
 
 
-def test_license_review_reports_repository_and_license_name_counts(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(
-        input_dir,
+def test_loaded_license_allowlist_reuses_the_human_policy_for_collection(tmp_path: Path) -> None:
+    allowlist_path = tmp_path / "license_allowlist.csv"
+    _write_csv(
+        allowlist_path,
+        ("license_name",),
         (
-            ("example/blank", ""),
-            ("example/mit", "MIT License"),
-            ("example/other", "Other"),
+            {"license_name": "MIT License"},
+            {"license_name": "Other"},
         ),
     )
-    checklist_path = tmp_path / "checklist.csv"
-    _write_checklist(
-        checklist_path,
-        tuple(
-            _review_row(repository, f"{repository.rsplit('/', 1)[1]}.md", human_decision="pass")
-            for repository in ("example/blank", "example/mit", "example/other")
+
+    allowlist = guideline_license.load_license_allowlist(allowlist_path)
+
+    assert allowlist.allows("MIT License")
+    assert not allowlist.allows("GNU GPL v3.0")
+    assert not allowlist.allows("Other")
+    assert not allowlist.allows("")
+
+
+def test_license_review_reports_repository_and_license_name_counts(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=3,
+    )
+    _write_collection_summary(collection_dir, target_reached=True, selected_repositories=3)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (
+            ("example/blank", "", "baseline"),
+            ("example/mit", "MIT License", "new_pending"),
+            ("example/other", "Other", "new_pending"),
         ),
     )
     output_dir = tmp_path / "license-review"
 
-    report = guideline_license.prepare_license_review(
-        input_dir=input_dir,
-        baseline_checklist_paths=(),
-        human_checklist_path=checklist_path,
+    report = guideline_license.prepare_collection_license_review(
+        collection_dir=collection_dir,
         output_dir=output_dir,
     )
 
@@ -171,7 +210,6 @@ def test_license_review_reports_repository_and_license_name_counts(tmp_path: Pat
     assert report.license_names == 3
     assert report.blank_license_repositories == 1
     assert report.other_license_repositories == 1
-    assert report.legacy_baseline_checklists == 0
     assert report.output_dir == output_dir
 
 
@@ -207,25 +245,27 @@ def test_license_allowlist_reports_accepted_and_rejected_counts(tmp_path: Path) 
 
 
 def test_license_review_persists_its_summary(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(input_dir, (("example/project", "MIT License"),))
-    checklist_path = tmp_path / "checklist.csv"
-    _write_checklist(
-        checklist_path,
-        (_review_row("example/project", "rules.md", human_decision="pass"),),
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=1,
+    )
+    _write_collection_summary(collection_dir, target_reached=True, selected_repositories=1)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (("example/project", "MIT License", "new_pending"),),
     )
     output_dir = tmp_path / "license-review"
 
-    guideline_license.prepare_license_review(
-        input_dir=input_dir,
-        baseline_checklist_paths=(),
-        human_checklist_path=checklist_path,
+    guideline_license.prepare_collection_license_review(
+        collection_dir=collection_dir,
         output_dir=output_dir,
     )
 
     assert json.loads((output_dir / "summary.json").read_text(encoding="utf-8")) == {
         "blank_license_repositories": 0,
-        "legacy_baseline_checklists": 0,
         "license_names": 1,
         "other_license_repositories": 0,
         "repositories": 1,
@@ -260,43 +300,27 @@ def test_license_allowlist_persists_its_summary(tmp_path: Path) -> None:
     }
 
 
-def test_license_review_rejects_conflicting_metadata_for_one_repository(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    input_dir.mkdir()
-    _write_candidate_file(input_dir / "first.csv", (("example/project", "MIT License"),))
-    _write_candidate_file(input_dir / "second.csv", (("example/project", "Apache License 2.0"),))
-    checklist_path = tmp_path / "checklist.csv"
-    _write_checklist(
-        checklist_path,
-        (_review_row("example/project", "rules.md", human_decision="pass"),),
+def test_license_review_rejects_a_duplicate_selected_repository(tmp_path: Path) -> None:
+    collection_dir = tmp_path / "collection"
+    collection_dir.mkdir()
+    _write_collection_configuration(
+        collection_dir,
+        license_policy_status="pending",
+        selected_repositories=2,
+    )
+    _write_collection_summary(collection_dir, target_reached=True, selected_repositories=2)
+    _write_selected_repositories(
+        collection_dir / "selected_repositories.csv",
+        (
+            ("example/project", "MIT License", "baseline"),
+            ("EXAMPLE/PROJECT", "Apache License 2.0", "new_pending"),
+        ),
     )
     output_dir = tmp_path / "license-review"
 
-    with pytest.raises(ValueError, match=r"license metadata is ambiguous.*example/project"):
-        guideline_license.prepare_license_review(
-            input_dir=input_dir,
-            baseline_checklist_paths=(),
-            human_checklist_path=checklist_path,
-            output_dir=output_dir,
-        )
-
-    assert not output_dir.exists()
-
-
-def test_current_human_checklist_requires_duplicate_column(tmp_path: Path) -> None:
-    input_dir = tmp_path / "candidates"
-    _write_candidates(input_dir, (("example/project", "MIT License"),))
-    checklist_path = tmp_path / "checklist.csv"
-    review_row = _review_row("example/project", "rules.md", human_decision="pass")
-    del review_row["duplicate_of"]
-    _write_checklist(checklist_path, (review_row,))
-    output_dir = tmp_path / "license-review"
-
-    with pytest.raises(ValueError, match=r"checklist is missing required columns.*duplicate_of"):
-        guideline_license.prepare_license_review(
-            input_dir=input_dir,
-            baseline_checklist_paths=(),
-            human_checklist_path=checklist_path,
+    with pytest.raises(ValueError, match=r"duplicate selected repository.*example/project"):
+        guideline_license.prepare_collection_license_review(
+            collection_dir=collection_dir,
             output_dir=output_dir,
         )
 
@@ -328,48 +352,65 @@ def test_license_allowlist_requires_one_license_name_column(tmp_path: Path) -> N
     assert not output_dir.exists()
 
 
-def _review_row(
-    repository: str,
-    file: str,
-    *,
-    human_decision: str,
-    duplicate_of: str = "",
-) -> dict[str, str]:
-    return {
-        "repository": repository,
-        "file": file,
-        "github_url": f"https://example.test/{file}",
-        "human_decision": human_decision,
-        "duplicate_of": duplicate_of,
-    }
+def _candidate(repository_name: str, license_name: str) -> repository.RepositoryCandidate:
+    return repository.RepositoryCandidate(
+        repository=repository_name,
+        revision="a" * 40,
+        license_name=license_name,
+        source_file="python.csv",
+        input_index=0,
+        fields={"mainLanguage": "Python"},
+    )
 
 
-def _write_checklist(path: Path, rows: tuple[dict[str, str], ...]) -> None:
-    _write_csv(path, tuple(rows[0]), rows)
-
-
-def _write_candidates(path: Path, rows: tuple[tuple[str, str], ...]) -> None:
-    path.mkdir()
-    _write_candidate_file(path / "python.csv", rows)
-
-
-def _write_candidate_file(path: Path, rows: tuple[tuple[str, str], ...]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as output_file:
-        writer = csv.DictWriter(
-            output_file,
-            fieldnames=("name", "lastCommitSHA", "lastCommit", "defaultBranch", "license"),
-        )
-        writer.writeheader()
-        writer.writerows(
+def _write_selected_repositories(
+    path: Path,
+    rows: tuple[tuple[str, str, str], ...],
+) -> None:
+    _write_csv(
+        path,
+        ("repository", "revision", "sampling_language", "license_name", "origin", "sample_order"),
+        tuple(
             {
-                "name": repository,
-                "lastCommitSHA": "a" * 40,
-                "lastCommit": "2026-08-01T00:00:00+00:00",
-                "defaultBranch": "main",
-                "license": license_name,
+                "repository": repository_name,
+                "revision": "a" * 40,
+                "sampling_language": "Python",
+                "license_name": license_name,
+                "origin": origin,
+                "sample_order": "" if origin == "baseline" else str(index),
             }
-            for repository, license_name in rows
-        )
+            for index, (repository_name, license_name, origin) in enumerate(rows, start=1)
+        ),
+    )
+
+
+def _write_collection_summary(
+    collection_dir: Path,
+    *,
+    target_reached: bool,
+    selected_repositories: int,
+) -> None:
+    (collection_dir / "collection_summary.json").write_text(
+        f"{json.dumps({'selected_total_repositories': selected_repositories, 'target_reached': target_reached})}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_collection_configuration(
+    collection_dir: Path,
+    *,
+    license_policy_status: str,
+    selected_repositories: int,
+) -> None:
+    document = {
+        "license_policy_status": license_policy_status,
+        "target_total_repositories": selected_repositories,
+        "target_repositories_by_language": {"Python": selected_repositories},
+    }
+    (collection_dir / "collection_configuration.json").write_text(
+        f"{json.dumps(document)}\n",
+        encoding="utf-8",
+    )
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

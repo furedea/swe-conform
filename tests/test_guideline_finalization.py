@@ -18,6 +18,7 @@ class FinalizationInputs:
     collection_dir: Path
     baseline_path: Path
     human_path: Path
+    license_allowlist_path: Path
     output_dir: Path
     baseline_revision: str
     new_revision: str
@@ -30,6 +31,7 @@ def test_validated_collection_is_materialized_as_one_final_bundle(tmp_path: Path
         collection_dir=inputs.collection_dir,
         baseline_checklist_paths=(inputs.baseline_path,),
         human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
         output_dir=inputs.output_dir,
     )
 
@@ -40,6 +42,7 @@ def test_validated_collection_is_materialized_as_one_final_bundle(tmp_path: Path
             "repository": "example/baseline",
             "revision": inputs.baseline_revision,
             "sampling_language": "Python",
+            "license_name": "MIT License",
             "origin": "baseline",
             "sample_order": "",
             "guideline_file_count": "1",
@@ -48,6 +51,7 @@ def test_validated_collection_is_materialized_as_one_final_bundle(tmp_path: Path
             "repository": "example/new",
             "revision": inputs.new_revision,
             "sampling_language": "Java",
+            "license_name": "Apache License 2.0",
             "origin": "new",
             "sample_order": "7",
             "guideline_file_count": "1",
@@ -61,6 +65,8 @@ def test_validated_collection_is_materialized_as_one_final_bundle(tmp_path: Path
     assert json.loads((inputs.output_dir / "summary.json").read_text(encoding="utf-8"))["status"] == "passed"
     provenance = json.loads((inputs.output_dir / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["classification"]["model"] == "gpt-5.6-luna"
+    assert provenance["collection"]["license_allowlist"] == ["Apache License 2.0", "MIT License"]
+    assert any(source["role"] == "license_allowlist" for source in provenance["sources"])
     assert set(provenance["artifacts"]) == {"guideline_files.csv", "repositories.csv", "summary.json"}
     first_bundle = {path.name: path.read_bytes() for path in inputs.output_dir.iterdir()}
 
@@ -68,6 +74,7 @@ def test_validated_collection_is_materialized_as_one_final_bundle(tmp_path: Path
         collection_dir=inputs.collection_dir,
         baseline_checklist_paths=(inputs.baseline_path,),
         human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
         output_dir=inputs.output_dir,
     )
 
@@ -85,6 +92,7 @@ def test_unrelated_existing_output_is_rejected_before_final_artifacts_are_writte
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
@@ -102,6 +110,7 @@ def test_non_github_review_url_is_rejected_before_outputs_are_written(tmp_path: 
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
@@ -119,6 +128,7 @@ def test_blank_accepted_file_identifier_is_rejected_before_outputs_are_written(t
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
@@ -139,6 +149,7 @@ def test_unpinned_selected_revision_is_rejected_before_outputs_are_written(tmp_p
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
@@ -156,6 +167,271 @@ def test_selected_repository_without_an_accepted_guideline_is_rejected(tmp_path:
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_selected_repository_outside_the_recorded_license_allowlist_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    selected_path = inputs.collection_dir / "selected_repositories.csv"
+    selected_rows = _read_csv(selected_path)
+    selected_rows[1]["license_name"] = "GNU GPL v3.0"
+    _write_csv(selected_path, tuple(selected_rows))
+
+    with pytest.raises(ValueError, match=r"selected repository license is not allowlisted.*example/new"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_recorded_license_ineligible_review_is_excluded_from_the_final_bundle(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    baseline_rows = _read_csv(inputs.baseline_path)
+    baseline_rows.append(
+        _review_row(
+            repository="example/ineligible",
+            file="example--ineligible/CONTRIBUTING.md",
+            revision="c" * 40,
+            review_origin="baseline_review",
+        ),
+    )
+    _write_csv(inputs.baseline_path, tuple(baseline_rows))
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["baseline_checklist_fingerprints"] = {
+        str(inputs.baseline_path.resolve()): _sha256(inputs.baseline_path),
+    }
+    configuration["license_ineligible_reviewed_repositories"] = ["example/ineligible"]
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    assert report.repositories == 2
+    assert {row["repository"] for row in _read_csv(inputs.output_dir / "repositories.csv")} == {
+        "example/baseline",
+        "example/new",
+    }
+    reviewed_files = json.loads(
+        (inputs.output_dir / "summary.json").read_text(encoding="utf-8"),
+    )["reviewed_files"]
+    assert reviewed_files == {
+        "accepted": 2,
+        "duplicates": 0,
+        "license_ineligible": 1,
+        "not_found": 0,
+        "total": 3,
+    }
+
+
+def test_collection_without_the_recorded_license_policy_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration.pop("license_allowlist")
+    configuration.pop("license_allowlist_fingerprints")
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="collection configuration has no license allowlist"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_pending_license_policy_is_rejected_before_outputs_are_written(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration["license_policy_status"] = "pending"
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="license policy must be applied before finalization"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_schema_five_requires_an_explicitly_applied_license_policy(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="license policy must be applied before finalization"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_applied_license_policy_in_schema_five_can_be_finalized(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 5
+    configuration["license_policy_status"] = "applied"
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    assert report.repositories == 2
+    provenance = json.loads((inputs.output_dir / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["collection"]["license_policy_status"] == "applied"
+
+
+def test_schema_four_remains_finalizable_as_a_legacy_applied_policy(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+
+    report = guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    assert report.repositories == 2
+
+
+def test_collection_without_a_prior_collection_provenance_field_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration.pop("prior_collection_fingerprints")
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid prior collection fingerprints"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_previous_collection_configuration_schema_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["schema_version"] = 3
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported collection configuration schema"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_collection_configuration_without_language_targets_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration.pop("target_repositories_by_language")
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="collection configuration has invalid language targets"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_new_collection_configuration_rejects_unbalanced_selected_languages(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["target_repositories_by_language"] = {"Java": 1, "Python": 1}
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    selected_path = inputs.collection_dir / "selected_repositories.csv"
+    selected_rows = _read_csv(selected_path)
+    selected_rows[0]["sampling_language"] = "Java"
+    _write_csv(selected_path, tuple(selected_rows))
+
+    with pytest.raises(ValueError, match="selected repository language counts do not match target"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
@@ -172,10 +448,88 @@ def test_changed_baseline_checklist_is_rejected_by_its_recorded_fingerprint(tmp_
             collection_dir=inputs.collection_dir,
             baseline_checklist_paths=(inputs.baseline_path,),
             human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
             output_dir=inputs.output_dir,
         )
 
     assert not inputs.output_dir.exists()
+
+
+def test_changed_license_allowlist_is_rejected_by_its_recorded_fingerprint(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    with inputs.license_allowlist_path.open("a", encoding="utf-8") as output_file:
+        output_file.write("BSD 3-Clause License\n")
+
+    with pytest.raises(ValueError, match="license allowlist fingerprint does not match"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def test_prior_collection_sources_are_verified_and_recorded_in_provenance(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    prior_configuration, prior_attempts, prior_manifest = _record_prior_collection(inputs, root=tmp_path / "prior")
+
+    guideline_finalization.finalize_guideline_collection(
+        collection_dir=inputs.collection_dir,
+        baseline_checklist_paths=(inputs.baseline_path,),
+        human_checklist_path=inputs.human_path,
+        license_allowlist_path=inputs.license_allowlist_path,
+        output_dir=inputs.output_dir,
+    )
+
+    provenance = json.loads((inputs.output_dir / "provenance.json").read_text(encoding="utf-8"))
+    prior_sources = [source for source in provenance["sources"] if source["role"] == "prior_collection"]
+    assert {source["path"] for source in prior_sources} == {
+        str(prior_configuration),
+        str(prior_attempts),
+        str(prior_manifest),
+    }
+
+
+def test_changed_prior_collection_source_is_rejected(tmp_path: Path) -> None:
+    inputs = _valid_inputs(tmp_path)
+    _, prior_attempts, _ = _record_prior_collection(inputs, root=tmp_path / "prior")
+    prior_attempts.write_text('{"status": "pass"}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="prior collection fingerprint does not match"):
+        guideline_finalization.finalize_guideline_collection(
+            collection_dir=inputs.collection_dir,
+            baseline_checklist_paths=(inputs.baseline_path,),
+            human_checklist_path=inputs.human_path,
+            license_allowlist_path=inputs.license_allowlist_path,
+            output_dir=inputs.output_dir,
+        )
+
+    assert not inputs.output_dir.exists()
+
+
+def _record_prior_collection(inputs: FinalizationInputs, *, root: Path) -> tuple[Path, Path, Path]:
+    root.mkdir()
+    prior_configuration = root / "collection_configuration.json"
+    prior_attempts = root / "repository_attempts.jsonl"
+    prior_manifest = root / "sampling_manifest.csv"
+    prior_configuration.write_text('{"schema_version": 2}\n', encoding="utf-8")
+    prior_attempts.write_text('{"status": "not_found"}\n', encoding="utf-8")
+    prior_manifest.write_text("sample_order,name\n1,example/prior\n", encoding="utf-8")
+    configuration_path = inputs.collection_dir / "collection_configuration.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    configuration["prior_collection_fingerprints"] = {
+        str(prior_configuration): _sha256(prior_configuration),
+        str(prior_attempts): _sha256(prior_attempts),
+        str(prior_manifest): _sha256(prior_manifest),
+    }
+    configuration_path.write_text(
+        f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    return prior_configuration, prior_attempts, prior_manifest
 
 
 def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
@@ -183,6 +537,7 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
     collection_dir.mkdir()
     baseline_path = tmp_path / "baseline.csv"
     human_path = tmp_path / "human.csv"
+    license_allowlist_path = tmp_path / "license_allowlist.csv"
     output_dir = collection_dir / "final"
     baseline_revision = "a" * 40
     new_revision = "b" * 40
@@ -193,6 +548,7 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
                 "repository": "example/baseline",
                 "revision": baseline_revision,
                 "sampling_language": "Python",
+                "license_name": "MIT License",
                 "origin": "baseline",
                 "sample_order": "",
             },
@@ -200,6 +556,7 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
                 "repository": "example/new",
                 "revision": new_revision,
                 "sampling_language": "Java",
+                "license_name": "Apache License 2.0",
                 "origin": "new_pending",
                 "sample_order": "7",
             },
@@ -230,18 +587,33 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
             },
         ),
     )
+    _write_csv(
+        license_allowlist_path,
+        (
+            {"license_name": "Apache License 2.0"},
+            {"license_name": "MIT License"},
+        ),
+    )
     configuration = {
+        "schema_version": 4,
         "baseline_checklist_fingerprints": {str(baseline_path.resolve()): _sha256(baseline_path)},
         "baseline_repositories": ["example/baseline"],
         "classification_contract_sha256": "contract-sha256",
         "filter": {"filename_terms": ["agents"]},
         "languages": ["Java", "Python"],
+        "license_allowlist": ["Apache License 2.0", "MIT License"],
+        "license_allowlist_fingerprints": {
+            str(license_allowlist_path): _sha256(license_allowlist_path),
+        },
+        "license_ineligible_reviewed_repositories": [],
         "model": "gpt-5.6-luna",
         "provider": "bedrock",
+        "prior_collection_fingerprints": {},
         "reasoning_effort": "max",
         "sample_seed": 20260807,
         "sampling_method": "stratified_random_round_robin_until_target",
         "target_total_repositories": 2,
+        "target_repositories_by_language": {"Java": 1, "Python": 1},
     }
     (collection_dir / "collection_configuration.json").write_text(
         f"{json.dumps(configuration, indent=2, sort_keys=True)}\n",
@@ -251,6 +623,7 @@ def _valid_inputs(tmp_path: Path) -> FinalizationInputs:
         collection_dir=collection_dir,
         baseline_path=baseline_path,
         human_path=human_path,
+        license_allowlist_path=license_allowlist_path,
         output_dir=output_dir,
         baseline_revision=baseline_revision,
         new_revision=new_revision,
